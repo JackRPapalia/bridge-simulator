@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bridge Load Lab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Text:wght@600;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app" id="app" data-mode="build">
+  <header class="bar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 30 18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M2 15 L8 4 H22 L28 15 M8 4 L15 15 L22 4 M8 4 V15 M22 4 V15"/><path class="deck" d="M1 15.5 H29" stroke-width="2.4"/></svg>
+      <span class="brand-name">Bridge Load Lab</span>
+    </div>
+
+    <div class="group" role="toolbar" aria-label="Tools" id="tools">
+      <button type="button" class="tool" data-tool="build" title="Build members (B)"><span class="k">B</span>Build</button>
+      <button type="button" class="tool" data-tool="select" title="Select and move (V)"><span class="k">V</span>Select</button>
+      <button type="button" class="tool" data-tool="weight" title="Place weight (W)"><span class="k">W</span>Weight</button>
+      <button type="button" class="tool" data-tool="anchor" title="Anchor to ground (A)"><span class="k">A</span>Anchor</button>
+      <button type="button" class="tool" data-tool="erase" title="Erase (E)"><span class="k">E</span>Erase</button>
+    </div>
+
+    <div class="group" role="radiogroup" aria-label="Material" id="materials"></div>
+
+    <div class="group actions">
+      <button type="button" class="ghost" id="undo" title="Undo (Ctrl+Z)">Undo</button>
+      <button type="button" class="ghost" id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button type="button" class="primary" id="run" title="Run the load test (Enter)">Run load test</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="view" aria-label="Bridge drawing area"></canvas>
+      <div class="hint" id="hint" aria-live="polite"></div>
+      <div class="toast" id="toast" role="status" hidden></div>
+      <div class="simbar" id="simbar" hidden>
+        <div class="simclock"><span id="simTime">0.00 s</span><span class="sep">·</span><span id="simLoad">Load 0%</span><span class="sep">·</span><span id="simBroken">0 broken</span></div>
+        <div class="simctl">
+          <button type="button" class="ghost" id="pause">Pause</button>
+          <button type="button" class="ghost" id="slow" aria-pressed="false">Slow-mo</button>
+          <button type="button" class="ghost" id="stop">Stop</button>
+        </div>
+      </div>
+      <div class="legend" id="legend" hidden>
+        <span>Utilisation</span>
+        <i class="ramp" aria-hidden="true"></i>
+        <span class="ticks"><b>0%</b><b>50%</b><b>100%+</b></span>
+      </div>
+    </div>
+
+    <aside class="panel" id="panel">
+      <!-- Build mode -->
+      <section class="pane" id="paneBuild">
+        <div class="block">
+          <h2>Weight</h2>
+          <label class="field" for="mass">
+            <span id="massLabel">Mass for new weights</span>
+            <span class="num-input"><input id="mass" type="number" min="10" max="500000" step="100" value="10000"><em>kg</em></span>
+          </label>
+          <div class="chips" id="massPresets">
+            <button type="button" data-mass="1500">Car 1.5 t</button>
+            <button type="button" data-mass="3500">Van 3.5 t</button>
+            <button type="button" data-mass="12000">Bus 12 t</button>
+            <button type="button" data-mass="40000">Truck 40 t</button>
+          </div>
+          <p class="note">Pick the Weight tool, then click a joint or a beam to place it.</p>
+        </div>
+
+        <div class="block" id="selBlock" hidden>
+          <h2 id="selTitle">Selection</h2>
+          <div id="selBody"></div>
+        </div>
+
+        <div class="block">
+          <h2>Site</h2>
+          <label class="field" for="gap">
+            <span>Gap to cross <output id="gapOut">18 m</output></span>
+            <input id="gap" type="range" min="8" max="40" step="1" value="18">
+          </label>
+          <label class="check" for="pier"><input id="pier" type="checkbox"> Rock pier mid-river</label>
+          <div class="row">
+            <select id="preset" aria-label="Starter design"></select>
+            <button type="button" class="ghost" id="loadPreset">Load</button>
+            <button type="button" class="ghost danger" id="clear">Clear</button>
+          </div>
+        </div>
+
+        <div class="block">
+          <h2>Design</h2>
+          <dl class="stats" id="stats"></dl>
+          <label class="check" for="live"><input id="live" type="checkbox"> Live stress preview</label>
+          <label class="check" for="snap"><input id="snap" type="checkbox" checked> Snap to 0.5 m grid</label>
+          <div class="row">
+            <button type="button" class="ghost" id="codeBtn">Design code</button>
+          </div>
+          <div class="codebox" id="codeBox" hidden>
+            <textarea id="code" rows="5" spellcheck="false" aria-label="Design code"></textarea>
+            <div class="row">
+              <button type="button" class="ghost" id="copyCode">Copy</button>
+              <button type="button" class="ghost" id="applyCode">Load this code</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Simulation mode -->
+      <section class="pane" id="paneSim" hidden>
+        <div class="block">
+          <h2>Load test running</h2>
+          <p class="note">Self weight comes on first, then the weights press down over two seconds. Members turn red as they approach their limit and snap when they pass it.</p>
+          <div class="meter"><span>Load applied</span><i><b id="loadBar"></b></i></div>
+          <div class="meter"><span>Most stressed member</span><i><b id="peakBar"></b></i></div>
+          <ol class="events" id="liveEvents"></ol>
+        </div>
+      </section>
+
+      <!-- Results mode -->
+      <section class="pane" id="paneResults" hidden>
+        <div class="block verdict-block">
+          <div class="verdict" id="verdict"></div>
+          <p class="verdict-text" id="verdictText"></p>
+          <div class="seg" role="radiogroup" aria-label="Results view" id="viewSeg">
+            <button type="button" data-view="weak" aria-pressed="true">Weak points</button>
+            <button type="button" data-view="final" aria-pressed="false">Final state</button>
+          </div>
+        </div>
+        <div class="block">
+          <dl class="metrics" id="metrics"></dl>
+        </div>
+        <div class="block">
+          <h2>Weak points</h2>
+          <ol class="weak" id="weakList"></ol>
+        </div>
+        <div class="block" id="seqBlock">
+          <h2>Failure sequence</h2>
+          <ol class="events" id="seqList"></ol>
+        </div>
+        <div class="block" id="tipsBlock">
+          <h2>What to try</h2>
+          <ul class="tips" id="tips"></ul>
+        </div>
+        <div class="block row">
+          <button type="button" class="primary" id="edit">Edit design</button>
+          <button type="button" class="ghost" id="rerun">Run again</button>
+        </div>
+      </section>
+    </aside>
+  </main>
+</div>
+
+<script src="js/core.js"></script>
+<script src="js/statics.js"></script>
+<script src="js/physics.js"></script>
+<script src="js/presets.js"></script>
+<script src="js/render.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
