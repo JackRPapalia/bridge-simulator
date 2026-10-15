@@ -14,6 +14,17 @@
     return B;
   }
 
+  /* Top-view framing for a row of joints at one height (sorted by x): a cross piece at every
+   * joint and a diagonal in every panel, sloping toward midspan so each half forms triangles. */
+  function brace(model, row, diagonals = true) {
+    row.forEach((n) => BS.addPlan(model, { n: n.id, s: 0 }, { n: n.id, s: 1 }));
+    if (!diagonals) return;
+    for (let i = 0; i < row.length - 1; i++) {
+      if (i + 0.5 < (row.length - 1) / 2) BS.addPlan(model, { n: row[i].id, s: 0 }, { n: row[i + 1].id, s: 1 });
+      else BS.addPlan(model, { n: row[i].id, s: 1 }, { n: row[i + 1].id, s: 0 });
+    }
+  }
+
   function centreLoad(model, B, mass) {
     const mid = B[Math.floor(B.length / 2)];
     model.loads.push({ id: model.nextId++, mass, node: mid.id });
@@ -39,6 +50,8 @@
           if (i + 0.5 < n / 2) BS.addMember(model, T[i].id, B[i + 1].id);
           else BS.addMember(model, T[i + 1].id, B[i].id);
         }
+        brace(model, B);
+        brace(model, T.filter(Boolean));
         centreLoad(model, B, mass);
       },
     },
@@ -56,6 +69,8 @@
           BS.addMember(model, B[i].id, T[i].id);
           BS.addMember(model, T[i].id, B[i + 1].id);
         }
+        brace(model, B);
+        brace(model, T);
         centreLoad(model, B, mass);
       },
     },
@@ -78,6 +93,8 @@
           if (i < n / 2) BS.addMember(model, B[i].id, A[i + 1].id);
           else BS.addMember(model, A[i].id, B[i + 1].id);
         }
+        brace(model, B);
+        brace(model, A.slice(1, -1), false);
         centreLoad(model, B, mass);
       },
     },
@@ -102,6 +119,9 @@
           if (i <= n / 2) BS.addMember(model, L.id, B[i].id);
           if (i >= n / 2) BS.addMember(model, R.id, B[i].id);
         }
+        brace(model, B);
+        brace(model, [L], false);
+        brace(model, [R], false);
         centreLoad(model, B, mass);
       },
     },
@@ -109,14 +129,16 @@
       name: 'Plain deck (no truss)',
       build(model, gap, mass) {
         const B = deck(model, gap, panels(gap));
+        brace(model, B);
         centreLoad(model, B, mass);
       },
     },
   };
 
-  function makePreset(key, gap, pier, mass, piece) {
+  function makePreset(key, gap, pier, mass, piece, width) {
     const model = BS.createModel(gap);
     model.pier = !!pier;
+    if (width) model.width = width;
     if (piece) model.piece = { ...piece };
     PRESETS[key].build(model, gap, mass == null ? 10 : mass);
     return model;

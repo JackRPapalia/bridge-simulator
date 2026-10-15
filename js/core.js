@@ -1,4 +1,9 @@
 /* Core data: the piece material, the bridge model, terrain and member capacity checks.
+ *
+ * The bridge is two identical side trusses (front at z = 0, back at z = width) drawn once in the
+ * side view, plus "plan" pieces drawn in the top view that join a joint on one truss to a joint
+ * on the other (cross pieces and lateral bracing).
+ *
  * Every member is cut from the same piece: one material, one cross-section.
  * Internally everything is SI (metres, kilograms, newtons, seconds); the UI shows centimetres.
  * World y points up; the table tops are at y = 0. */
@@ -7,6 +12,8 @@
   const BS = (root.BS = root.BS || {});
 
   const G = 9.81;
+  const FRONT = 0;
+  const BACK = 1;
 
   // Approximate properties along the grain / for the solid material.
   // E: stiffness, ft/fc/fb: tension, compression and bending strength (Pa), density kg/m³.
@@ -21,10 +28,11 @@
   };
   const MATERIAL_ORDER = ['balsa', 'basswood', 'birch', 'pine', 'spaghetti', 'aluminium', 'steel'];
 
-  /* The piece every member is cut from. width lies in the bridge's plane, thick is out of plane. */
+  /* The piece every member is cut from. On a side truss, width lies in the truss plane and
+   * thick points across the bridge. Top-view pieces lie flat, so their thickness is vertical. */
   const DEFAULT_PIECE = { material: 'balsa', width: 0.01, thick: 0.01, maxLen: 0.3 };
+  const DEFAULT_WIDTH = 0.08;
 
-  /* Section and strength properties of the piece (solid rectangle). Cached per piece spec. */
   let cacheKey = '';
   let cacheVal = null;
   function pieceProps(piece) {
@@ -34,15 +42,15 @@
     const m = MATERIALS[p.material] || MATERIALS.balsa;
     const w = p.width;
     const t = p.thick;
-    const big = Math.max(w, t);
-    const small = Math.min(w, t);
     cacheKey = key;
     cacheVal = {
       ...m,
       width: w, thick: t, maxLen: p.maxLen,
       A: w * t,
-      I: (big * small ** 3) / 12,   // weakest axis governs buckling
-      S: (t * w * w) / 6,           // bending in the bridge's plane
+      Iin: (t * w ** 3) / 12,     // bending/buckling within the truss plane
+      Iout: (w * t ** 3) / 12,    // buckling sideways, out of the truss plane
+      S: (t * w * w) / 6,         // side-truss member bending in its plane
+      Sflat: (w * t * t) / 6,     // top-view piece bending under a weight (laid flat)
       tensionOnly: false,
     };
     return cacheVal;
@@ -51,16 +59,28 @@
 
   const linearMass = (mat) => mat.density * mat.A;
   const tensionCapacity = (mat) => mat.ft * mat.A;
-  const eulerLoad = (mat, L) => (mat.I > 0 ? (Math.PI * Math.PI * mat.E * mat.I) / (L * L) : 0);
   const crushCapacity = (mat) => mat.fc * mat.A;
-  const compressionCapacity = (mat, L) =>
-    mat.tensionOnly ? 0 : Math.min(crushCapacity(mat), eulerLoad(mat, L));
-  const bendingCapacity = (mat) => mat.fb * mat.S;
-  const buckles = (mat, L) => eulerLoad(mat, L) < crushCapacity(mat);
+  const euler = (mat, I, L) => (I > 0 && L > 0 ? (Math.PI * Math.PI * mat.E * I) / (L * L) : Infinity);
+
+  /* Compression limit and the way it fails. Lout is the length that can bow sideways
+   * (between braced joints); it defaults to the member length. */
+  function compression(mat, L, Lout) {
+    const crush = crushCapacity(mat);
+    const inPlane = euler(mat, mat.Iin, L);
+    const sideways = euler(mat, mat.Iout, Lout || L);
+    const cap = Math.min(crush, inPlane, sideways);
+    const mode = cap === crush ? 'compression' : cap === sideways && sideways < inPlane ? 'sideways' : 'buckling';
+    return { cap, mode };
+  }
+  const compressionCapacity = (mat, L, Lout) => compression(mat, L, Lout).cap;
+  const buckles = (mat, L, Lout) => compression(mat, L, Lout).mode !== 'compression';
+  const bendingCapacity = (mat, flat) => mat.fb * (flat ? mat.Sflat : mat.S);
 
   /* Utilisation of a member under axial force N (tension +) and bending moment M.
-   * Uses a linear interaction: u = |N|/N_cap + M/M_cap. u >= 1 means failure. */
-  function checkMember(mat, L, N, M) {
+   * Linear interaction: u = |N|/N_cap + M/M_cap. u >= 1 means failure.
+   * opts.Lout: sideways buckling length; opts.flat: a top-view piece (bends about its thin axis). */
+  function checkMember(mat, L, N, M, opts) {
+    const o = opts || {};
     let axial = 0;
     let mode;
     if (mat.tensionOnly && N < 0) {
@@ -69,10 +89,11 @@
       axial = N / tensionCapacity(mat);
       mode = 'tension';
     } else {
-      axial = -N / compressionCapacity(mat, L);
-      mode = buckles(mat, L) ? 'buckling' : 'compression';
+      const c = compression(mat, L, o.Lout);
+      axial = -N / c.cap;
+      mode = c.mode;
     }
-    const Mc = bendingCapacity(mat);
+    const Mc = bendingCapacity(mat, o.flat);
     const bend = M > 0 && Mc > 0 ? M / Mc : 0;
     return { u: axial + bend, axial, bend, mode: bend > axial ? 'bending' : mode, N, M };
   }
@@ -84,6 +105,7 @@
     return `${N.toFixed(a < 10 ? 2 : a < 1000 ? 1 : 0)} N`;
   }
   const kgLabel = (kg) => (kg < 1 ? `${Math.round(kg * 1000)} g` : `${+kg.toFixed(kg < 10 ? 2 : 1)} kg`);
+  const sideName = (s) => (s === BACK ? 'back' : 'front');
 
   /* ---------- Terrain: two tables with a gap, floor below ---------- */
   function terrainOf(model) {
@@ -109,9 +131,17 @@
   /* ---------- Model ---------- */
   function createModel(gap) {
     return {
-      version: 2, nextId: 1, gap: gap || 0.5, pier: false,
-      piece: { ...DEFAULT_PIECE }, nodes: [], members: [], loads: [],
+      version: 3, nextId: 1, gap: gap || 0.5, width: DEFAULT_WIDTH, pier: false,
+      piece: { ...DEFAULT_PIECE }, nodes: [], members: [], plan: [], loads: [],
     };
+  }
+
+  /* Bring older saved designs up to the current shape. */
+  function upgradeModel(m) {
+    if (!Array.isArray(m.plan)) m.plan = [];
+    if (!(m.width > 0)) m.width = DEFAULT_WIDTH;
+    m.version = 3;
+    return m;
   }
 
   const cloneModel = (m) => JSON.parse(JSON.stringify(m));
@@ -149,6 +179,19 @@
     return m;
   }
 
+  const sameEnd = (p, q) => p.n === q.n && p.s === q.s;
+  function findPlanBetween(model, a, b) {
+    return model.plan.find((p) => (sameEnd(p.a, a) && sameEnd(p.b, b)) || (sameEnd(p.a, b) && sameEnd(p.b, a))) || null;
+  }
+
+  /* A top-view piece from joint a = {n, s} to joint b = {n, s} on the other truss. */
+  function addPlan(model, a, b) {
+    if (a.s === b.s || findPlanBetween(model, a, b)) return null;
+    const p = { id: model.nextId++, a: { n: a.n, s: a.s }, b: { n: b.n, s: b.s } };
+    model.plan.push(p);
+    return p;
+  }
+
   function memberLength(model, m, map) {
     const nm = map || nodeMap(model);
     const a = nm.get(m.a);
@@ -156,14 +199,37 @@
     return Math.hypot(b.x - a.x, b.y - a.y);
   }
 
+  const sideZ = (model, s) => (s === BACK ? model.width : 0);
+
+  function planEnds(model, p, map) {
+    const nm = map || nodeMap(model);
+    const a = nm.get(p.a.n);
+    const b = nm.get(p.b.n);
+    if (!a || !b) return null;
+    return {
+      a: { x: a.x, y: a.y, z: sideZ(model, p.a.s) },
+      b: { x: b.x, y: b.y, z: sideZ(model, p.b.s) },
+    };
+  }
+
+  function planLength(model, p, map) {
+    const e = planEnds(model, p, map);
+    return e ? Math.hypot(e.b.x - e.a.x, e.b.y - e.a.y, e.b.z - e.a.z) : 0;
+  }
+
   function removeMember(model, id) {
     model.members = model.members.filter((m) => m.id !== id);
     model.loads = model.loads.filter((l) => l.member !== id);
   }
 
+  function removePlan(model, id) {
+    model.plan = model.plan.filter((p) => p.id !== id);
+    model.loads = model.loads.filter((l) => l.plan !== id);
+  }
+
   function removeNode(model, id) {
-    const doomed = model.members.filter((m) => m.a === id || m.b === id).map((m) => m.id);
-    doomed.forEach((mid) => removeMember(model, mid));
+    model.members.filter((m) => m.a === id || m.b === id).forEach((m) => removeMember(model, m.id));
+    model.plan.filter((p) => p.a.n === id || p.b.n === id).forEach((p) => removePlan(model, p.id));
     model.nodes = model.nodes.filter((n) => n.id !== id);
     model.loads = model.loads.filter((l) => l.node !== id);
   }
@@ -172,27 +238,75 @@
     model.loads = model.loads.filter((l) => l.id !== id);
   }
 
-  /* Drop joints that no member uses and are not anchors. */
-  function pruneOrphans(model) {
+  function usedNodes(model) {
     const used = new Set();
     model.members.forEach((m) => { used.add(m.a); used.add(m.b); });
-    model.nodes = model.nodes.filter((n) => used.has(n.id) || n.fixed);
-    const ids = new Set(model.nodes.map((n) => n.id));
-    model.loads = model.loads.filter((l) => (l.node == null ? true : ids.has(l.node)));
+    return used;
   }
 
-  /* World position of a load's attachment point. */
-  function loadPoint(model, load, map) {
+  /* Drop joints that no member uses and are not anchors (and anything hanging off them). */
+  function pruneOrphans(model) {
+    const used = usedNodes(model);
+    model.nodes.filter((n) => !used.has(n.id) && !n.fixed).forEach((n) => removeNode(model, n.id));
+  }
+
+  /* How a weight is shared between joints.
+   *   {node}            side view, centred across the deck: half on each truss
+   *   {member, t}       side view, centred, resting between two joints of a side member
+   *   {node, side}      top view, on one truss's joint
+   *   {member, t, side} top view, on one truss's member
+   *   {plan, t}         top view, on a cross piece or brace
+   * Returns terms [{s, node, c}] (c sums to 1), what it rests on, and its 3D position. */
+  function loadInfo(model, load, map) {
     const nm = map || nodeMap(model);
-    if (load.node != null) {
-      const n = nm.get(load.node);
-      return n ? { x: n.x, y: n.y } : null;
+    const W = model.width;
+    const sides = load.side == null ? [[FRONT, 0.5], [BACK, 0.5]] : [[load.side, 1]];
+    const z = load.side == null ? W / 2 : sideZ(model, load.side);
+    if (load.plan != null) {
+      const p = model.plan.find((pp) => pp.id === load.plan);
+      const e = p && planEnds(model, p, nm);
+      if (!e) return null;
+      const t = load.t;
+      return {
+        terms: [{ s: p.a.s, node: p.a.n, c: 1 - t }, { s: p.b.s, node: p.b.n, c: t }],
+        rest: { kind: 'plan', id: p.id, t },
+        pos: { x: e.a.x + (e.b.x - e.a.x) * t, y: e.a.y + (e.b.y - e.a.y) * t, z: e.a.z + (e.b.z - e.a.z) * t },
+      };
     }
-    const m = model.members.find((mm) => mm.id === load.member);
-    if (!m) return null;
-    const a = nm.get(m.a);
-    const b = nm.get(m.b);
-    return { x: a.x + (b.x - a.x) * load.t, y: a.y + (b.y - a.y) * load.t };
+    if (load.member != null) {
+      const m = model.members.find((mm) => mm.id === load.member);
+      if (!m) return null;
+      const a = nm.get(m.a);
+      const b = nm.get(m.b);
+      const t = load.t;
+      const terms = [];
+      for (const [s, f] of sides) terms.push({ s, node: m.a, c: f * (1 - t) }, { s, node: m.b, c: f * t });
+      return {
+        terms,
+        rest: { kind: 'member', id: m.id, t, sides: sides.map(([s, f]) => ({ s, f })) },
+        pos: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z },
+      };
+    }
+    const n = nm.get(load.node);
+    if (!n) return null;
+    return {
+      terms: sides.map(([s, f]) => ({ s, node: n.id, c: f })),
+      rest: { kind: 'node', id: n.id },
+      pos: { x: n.x, y: n.y, z },
+    };
+  }
+
+  const loadPoint = (model, load, map) => loadInfo(model, load, map)?.pos || null;
+
+  /* Distinct joint heights (top-view levels), highest first. */
+  function levelsOf(model) {
+    const used = usedNodes(model);
+    const ys = [];
+    for (const n of model.nodes) {
+      if (!used.has(n.id)) continue;
+      if (!ys.some((y) => Math.abs(y - n.y) < 1e-6)) ys.push(n.y);
+    }
+    return ys.sort((a, b) => b - a);
   }
 
   function designStats(model) {
@@ -202,22 +316,30 @@
     let overLong = 0;
     for (const m of model.members) {
       const L = memberLength(model, m, map);
+      length += 2 * L;
+      if (L > mat.maxLen + 1e-9) overLong += 2;
+    }
+    for (const p of model.plan) {
+      const L = planLength(model, p, map);
       length += L;
       if (L > mat.maxLen + 1e-9) overLong++;
     }
-    const used = new Set();
-    model.members.forEach((m) => { used.add(m.a); used.add(m.b); });
-    const joints = model.nodes.filter((n) => used.has(n.id)).length;
+    const used = usedNodes(model);
+    const joints = model.nodes.filter((n) => used.has(n.id)).length * 2;
     const load = model.loads.reduce((s, l) => s + l.mass, 0);
-    return { mass: linearMass(mat) * length, length, overLong, joints, members: model.members.length, load };
+    return {
+      mass: linearMass(mat) * length, length, overLong, joints,
+      members: model.members.length * 2 + model.plan.length, plan: model.plan.length, load,
+    };
   }
 
   Object.assign(BS, {
-    G, MATERIALS, MATERIAL_ORDER, DEFAULT_PIECE, pieceProps, memberMat,
-    linearMass, tensionCapacity, eulerLoad, crushCapacity, compressionCapacity, bendingCapacity, buckles, checkMember,
-    cm, newtons, kgLabel,
+    G, FRONT, BACK, MATERIALS, MATERIAL_ORDER, DEFAULT_PIECE, DEFAULT_WIDTH, pieceProps, memberMat,
+    linearMass, tensionCapacity, crushCapacity, compression, compressionCapacity, bendingCapacity, buckles, checkMember,
+    cm, newtons, kgLabel, sideName,
     terrainOf, onTerrain,
-    createModel, cloneModel, nodeMap, addNode, findNode, findMemberBetween, addMember, memberLength,
-    removeMember, removeNode, removeLoad, pruneOrphans, loadPoint, designStats,
+    createModel, upgradeModel, cloneModel, nodeMap, addNode, findNode, findMemberBetween, addMember,
+    findPlanBetween, addPlan, memberLength, sideZ, planEnds, planLength,
+    removeMember, removePlan, removeNode, removeLoad, usedNodes, pruneOrphans, loadInfo, loadPoint, levelsOf, designStats,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

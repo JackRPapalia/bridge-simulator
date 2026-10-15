@@ -1,7 +1,10 @@
 /* Real-time dynamic test using small-step XPBD (extended position based dynamics).
- * Each member is a compliant distance constraint with compliance L / (E A), so the
- * constraint impulse gives the true axial force. Members break when their utilisation
- * reaches 1 and the structure is free to collapse. */
+ *
+ * Both side trusses are simulated in their own planes. Each side member is a compliant distance
+ * constraint with compliance L / (E A), so the constraint impulse gives the true axial force.
+ * Weights are particles tied to the joints they rest on (shared between trusses for weights placed
+ * across the deck). Top-view pieces are checked for bending under the weights they carry; when
+ * one breaks, its weights drop. Members break when their utilisation reaches 1. */
 (function (root) {
   'use strict';
   const BS = root.BS;
@@ -21,17 +24,18 @@
   class Simulation {
     constructor(model) {
       this.model = BS.cloneModel(model);
-      this.terrain = BS.terrainOf(this.model);
-      const nm = BS.nodeMap(this.model);
+      const M = this.model;
+      this.terrain = BS.terrainOf(M);
+      const nm = BS.nodeMap(M);
+      const mat = BS.memberMat(M);
+      this.mat = mat;
 
-      const used = new Set();
-      this.model.members.forEach((m) => { used.add(m.a); used.add(m.b); });
-      const nodeLoads = this.model.loads.filter((l) => l.node != null);
-      nodeLoads.forEach((l) => used.add(l.node));
-      const memberLoads = this.model.loads.filter((l) => l.member != null && this.model.members.some((m) => m.id === l.member));
+      const used = BS.usedNodes(M);
+      const infos = M.loads.map((l) => ({ load: l, info: BS.loadInfo(M, l, nm) })).filter((x) => x.info);
+      infos.forEach(({ info }) => info.terms.forEach((t) => used.add(t.node)));
+      const simNodes = M.nodes.filter((n) => used.has(n.id));
 
-      const simNodes = this.model.nodes.filter((n) => used.has(n.id));
-      const N = simNodes.length + memberLoads.length;
+      const N = simNodes.length * 2 + infos.length;
       this.count = N;
       this.x = new Float64Array(N); this.y = new Float64Array(N);
       this.px = new Float64Array(N); this.py = new Float64Array(N);
@@ -41,62 +45,84 @@
       this.loadMass = new Float64Array(N);
       this.x0 = new Float64Array(N); this.y0 = new Float64Array(N);
       this.nodeIndex = new Map();
-      this.nodeIds = [];
 
-      simNodes.forEach((n, i) => {
-        this.nodeIndex.set(n.id, i);
-        this.nodeIds.push(n.id);
-        this.x[i] = n.x; this.y[i] = n.y;
-      });
+      let i = 0;
+      for (const s of [0, 1]) {
+        for (const n of simNodes) {
+          this.nodeIndex.set(`${n.id}:${s}`, i);
+          this.x[i] = n.x; this.y[i] = n.y;
+          i++;
+        }
+      }
+      const pi = (id, s) => this.nodeIndex.get(`${id}:${s}`);
 
-      const mat = BS.memberMat(this.model);
-      this.members = this.model.members.map((m) => {
-        const a = this.nodeIndex.get(m.a);
-        const b = this.nodeIndex.get(m.b);
-        const L0 = Math.hypot(this.x[b] - this.x[a], this.y[b] - this.y[a]);
+      // Sideways buckling lengths come from the top-view bracing.
+      const braced = BS.lateralBracing(M, nm);
+      const Lout = BS.sidewaysLengths(M, nm, braced);
+
+      this.members = [];
+      for (const s of [0, 1]) {
+        for (const m of M.members) {
+          const a = pi(m.a, s);
+          const b = pi(m.b, s);
+          const L0 = Math.hypot(this.x[b] - this.x[a], this.y[b] - this.y[a]);
+          const half = (BS.linearMass(mat) * L0) / 2;
+          this.selfMass[a] += half; this.selfMass[b] += half;
+          this.members.push({
+            key: `${m.id}:${s}`, kind: 'member', id: m.id, side: s, a, b, L0, Lout: Lout.get(`${m.id}:${s}`),
+            alpha: L0 / (mat.E * mat.A), broken: false, F: 0, Fs: 0, u: 0, mode: '', peakU: 0, peakMode: '', M: 0,
+            name: `M${m.id}`, where: `${BS.sideName(s)} truss`,
+          });
+        }
+      }
+      this.memberByKey = new Map(this.members.map((c) => [c.key, c]));
+
+      this.plans = M.plan.map((p) => {
+        const L0 = BS.planLength(M, p, nm);
+        const a = pi(p.a.n, p.a.s);
+        const b = pi(p.b.n, p.b.s);
         const half = (BS.linearMass(mat) * L0) / 2;
         this.selfMass[a] += half; this.selfMass[b] += half;
         return {
-          id: m.id, a, b, L0, mat, alpha: L0 / (mat.E * mat.A),
-          broken: false, F: 0, Fs: 0, u: 0, mode: '', peakU: 0, peakMode: '', M: 0,
+          key: `p${p.id}`, kind: 'plan', id: p.id, a, b, L0, Lout: L0, broken: false,
+          u: 0, mode: '', peakU: 0, peakMode: '', name: `P${p.id}`, where: 'top-view piece',
         };
       });
-      this.memberById = new Map(this.members.map((c) => [c.id, c]));
+      this.planById = new Map(this.plans.map((c) => [c.id, c]));
 
-      for (const l of nodeLoads) this.loadMass[this.nodeIndex.get(l.node)] += l.mass;
-
-      // Weights resting between joints become their own particles, tied to the beam.
-      this.attachments = [];
-      this.weights = [];
-      memberLoads.forEach((l, k) => {
-        const p = simNodes.length + k;
-        const c = this.memberById.get(l.member);
-        this.x[p] = this.x[c.a] + (this.x[c.b] - this.x[c.a]) * l.t;
-        this.y[p] = this.y[c.a] + (this.y[c.b] - this.y[c.a]) * l.t;
-        this.loadMass[p] = l.mass;
-        this.attachments.push({ load: l, p, member: c, t: l.t, active: true });
-        this.weights.push({ load: l, p });
+      // Every weight is a particle tied to the joints it rests on: p = sum(c_i * x_i).
+      this.weights = infos.map(({ load, info }, k) => {
+        const p = simNodes.length * 2 + k;
+        const terms = info.terms.map((t) => ({ p: pi(t.node, t.s), c: t.c }));
+        this.x[p] = terms.reduce((s, t) => s + t.c * this.x[t.p], 0);
+        this.y[p] = terms.reduce((s, t) => s + t.c * this.y[t.p], 0);
+        this.loadMass[p] = load.mass;
+        this.inv[p] = 1 / load.mass;
+        let rests = [];
+        if (info.rest.kind === 'plan') rests = [`p${info.rest.id}`];
+        else if (info.rest.kind === 'member') rests = info.rest.sides.map((x) => `${info.rest.id}:${x.s}`);
+        return { load, p, terms, rest: info.rest, rests, z: info.pos.z, active: true };
       });
-      for (const l of nodeLoads) this.weights.push({ load: l, p: this.nodeIndex.get(l.node) });
 
-      simNodes.forEach((n, i) => {
-        this.selfMass[i] += JOINT_MASS;
-        this.inv[i] = n.fixed ? 0 : 1 / (Math.max(this.selfMass[i], MIN_INERTIA) + this.loadMass[i]);
+      simNodes.forEach((n) => {
+        for (const s of [0, 1]) {
+          const j = pi(n.id, s);
+          this.selfMass[j] += JOINT_MASS;
+          this.inv[j] = n.fixed ? 0 : 1 / Math.max(this.selfMass[j], MIN_INERTIA);
+        }
       });
-      for (const a of this.attachments) this.inv[a.p] = 1 / this.loadMass[a.p];
 
       this.x0.set(this.x); this.y0.set(this.y);
       this.time = 0;
       this.events = [];
       this.debris = [];
-      this.splashes = [];
       this.collapseTime = null;
       this.calmTime = 0;
       this.done = false;
       this.outcome = null;
       this.peakDeflection = 0;
-      this.fallDrop = Math.max(0.05, 0.2 * this.model.gap);
       this.maxPeakU = 0;
+      this.fallDrop = Math.max(0.05, 0.2 * M.gap);
     }
 
     get loadRamp() { return smooth((this.time - LOAD_START) / LOAD_RAMP); }
@@ -115,6 +141,7 @@
       const selfR = this.selfRamp;
       const loadR = this.loadRamp;
       const damp = Math.exp(-AIR_DAMP * h);
+
       for (let i = 0; i < N; i++) {
         px[i] = x[i]; py[i] = y[i];
         if (inv[i] === 0) continue;
@@ -134,7 +161,7 @@
         const d = Math.hypot(dx, dy);
         const C = d - c.L0;
         const w = inv[a] + inv[b];
-        if (d < 1e-9 || w === 0 || (c.mat.tensionOnly && C <= 0)) { c.F = 0; continue; }
+        if (d < 1e-12 || w === 0) { c.F = 0; continue; }
         const nx = dx / d; const ny = dy / d;
         const dl = -C / (w + c.alpha / h2);
         x[a] += inv[a] * dl * nx; y[a] += inv[a] * dl * ny;
@@ -142,17 +169,19 @@
         c.F = -dl / h2;
       }
 
-      for (const at of this.attachments) {
-        if (!at.active) continue;
-        const { p, t } = at;
-        const a = at.member.a; const b = at.member.b;
-        const cx = x[p] - ((1 - t) * x[a] + t * x[b]);
-        const cy = y[p] - ((1 - t) * y[a] + t * y[b]);
-        const w = inv[p] + (1 - t) * (1 - t) * inv[a] + t * t * inv[b];
+      for (const wt of this.weights) {
+        if (!wt.active) continue;
+        const p = wt.p;
+        let cx = x[p];
+        let cy = y[p];
+        let w = inv[p];
+        for (const t of wt.terms) { cx -= t.c * x[t.p]; cy -= t.c * y[t.p]; w += t.c * t.c * inv[t.p]; }
         if (w === 0) continue;
         x[p] -= (inv[p] * cx) / w; y[p] -= (inv[p] * cy) / w;
-        x[a] += ((1 - t) * inv[a] * cx) / w; y[a] += ((1 - t) * inv[a] * cy) / w;
-        x[b] += (t * inv[b] * cx) / w; y[b] += (t * inv[b] * cy) / w;
+        for (const t of wt.terms) {
+          x[t.p] += (t.c * inv[t.p] * cx) / w;
+          y[t.p] += (t.c * inv[t.p] * cy) / w;
+        }
       }
 
       for (let i = 0; i < N; i++) if (inv[i] > 0) this.collide(i);
@@ -172,11 +201,9 @@
           const d = Math.hypot(dx, dy) || 1;
           const nx = dx / d; const ny = dy / d;
           const rv = (vx[b] - vx[a]) * nx + (vy[b] - vy[a]) * ny;
-          if (!(c.mat.tensionOnly && d < c.L0)) {
-            const j = (AXIAL_DAMP * rv) / w;
-            vx[a] += inv[a] * j * nx; vy[a] += inv[a] * j * ny;
-            vx[b] -= inv[b] * j * nx; vy[b] -= inv[b] * j * ny;
-          }
+          const j = (AXIAL_DAMP * rv) / w;
+          vx[a] += inv[a] * j * nx; vy[a] += inv[a] * j * ny;
+          vx[b] -= inv[b] * j * nx; vy[b] -= inv[b] * j * ny;
         }
         c.Fs += (c.F - c.Fs) * sm;
       }
@@ -199,15 +226,27 @@
       }
     }
 
-    /* Bending moment in member c from self weight and weights resting on it (current geometry). */
-    momentOf(c) {
+    /* Bending moment in side member c from self weight and weights resting on it (current geometry). */
+    memberMoment(c) {
       const dx = this.x[c.b] - this.x[c.a];
       const dy = this.y[c.b] - this.y[c.a];
       const L = Math.hypot(dx, dy) || c.L0;
       const perp = Math.abs(dx) / L;
-      let M = (BS.linearMass(c.mat) * BS.G * this.selfRamp * perp * L * L) / 8;
-      for (const at of this.attachments) {
-        if (at.active && at.member === c) M += at.load.mass * BS.G * this.loadRamp * perp * at.t * (1 - at.t) * L;
+      let M = (BS.linearMass(this.mat) * BS.G * this.selfRamp * perp * L * L) / 8;
+      for (const wt of this.weights) {
+        if (!wt.active || wt.rest.kind !== 'member' || wt.rest.id !== c.id) continue;
+        const share = wt.rest.sides.find((sd) => sd.s === c.side);
+        if (share) M += wt.load.mass * BS.G * this.loadRamp * share.f * perp * wt.rest.t * (1 - wt.rest.t) * L;
+      }
+      return M;
+    }
+
+    planMoment(c) {
+      let M = (BS.linearMass(this.mat) * BS.G * this.selfRamp * c.L0 * c.L0) / 8;
+      for (const wt of this.weights) {
+        if (wt.active && wt.rest.kind === 'plan' && wt.rest.id === c.id) {
+          M += wt.load.mass * BS.G * this.loadRamp * wt.rest.t * (1 - wt.rest.t) * c.L0;
+        }
       }
       return M;
     }
@@ -215,17 +254,23 @@
     afterFrame(dt) {
       let worst = null;
       let worstCheck = null;
-      for (const c of this.members) {
-        if (c.broken) continue;
-        c.M = this.momentOf(c);
-        const chk = BS.checkMember(c.mat, c.L0, c.Fs, c.M);
+      const consider = (c, chk) => {
         c.u = chk.u;
         c.mode = chk.mode;
         if (this.time > 0.15 && chk.u > c.peakU) { c.peakU = chk.u; c.peakMode = chk.mode; }
-        if (this.time > 0.15 && chk.u >= 1 && (!worst || chk.u > worst.u)) { worst = c; worstCheck = chk; }
+        if (this.time > 0.15 && chk.u >= 1 && (!worst || chk.u > worstCheck.u)) { worst = c; worstCheck = chk; }
+      };
+      for (const c of this.members) {
+        if (c.broken) continue;
+        c.M = this.memberMoment(c);
+        consider(c, BS.checkMember(this.mat, c.L0, c.Fs, c.M, { Lout: c.Lout }));
       }
-      if (worst) this.breakMember(worst, worstCheck);
-      this.maxPeakU = this.members.reduce((s, c) => Math.max(s, c.peakU), 0);
+      for (const c of this.plans) {
+        if (c.broken) continue;
+        consider(c, BS.checkMember(this.mat, c.L0, 0, this.planMoment(c), { flat: true }));
+      }
+      if (worst) this.breakPiece(worst, worstCheck);
+      this.maxPeakU = [...this.members, ...this.plans].reduce((s, c) => Math.max(s, c.peakU), 0);
 
       // Track the weights: deflection and whether they fell.
       let fallen = false;
@@ -253,24 +298,27 @@
       }
     }
 
-    breakMember(c, chk) {
+    breakPiece(c, chk) {
       c.broken = true;
       c.peakU = Math.max(c.peakU, chk.u);
       c.peakMode = chk.mode;
       c.u = chk.u;
-      this.events.push({ id: c.id, time: this.time, mode: chk.mode, force: chk.N, load: this.loadRamp });
-      for (const at of this.attachments) if (at.member === c) at.active = false;
+      this.events.push({
+        key: c.key, kind: c.kind, id: c.id, side: c.side, name: c.name, where: c.where,
+        time: this.time, mode: chk.mode, force: chk.N, load: this.loadRamp,
+      });
+      for (const wt of this.weights) if (wt.rests.includes(c.key)) wt.active = false;
 
       const { x, y, vx, vy } = this;
       const mx = (x[c.a] + x[c.b]) / 2;
       const my = (y[c.a] + y[c.b]) / 2;
-      [[c.a, mx, my], [c.b, mx, my]].forEach(([i, ex, ey], k) => {
+      [c.a, c.b].forEach((i, k) => {
         this.debris.push({
-          x: (x[i] + ex) / 2, y: (y[i] + ey) / 2,
+          x: (x[i] + mx) / 2, y: (y[i] + my) / 2,
           vx: vx[i] * 0.5 + (k ? 0.15 : -0.15), vy: vy[i] * 0.5 + 0.2,
           ang: Math.atan2(y[c.b] - y[c.a], x[c.b] - x[c.a]),
           spin: (k ? 1 : -1) * (2 + Math.random() * 4),
-          len: c.L0 / 2, mat: c.mat, id: c.id, life: 6,
+          len: c.L0 / 2, mat: this.mat, key: c.key, side: c.side, life: 6,
         });
       });
     }
@@ -301,9 +349,9 @@
       else this.outcome = 'held';
     }
 
-    /* Current position of a model node (for rendering). */
-    nodePos(id) {
-      const i = this.nodeIndex.get(id);
+    /* Current position of a model joint on one truss (for rendering). */
+    nodePos(id, side) {
+      const i = this.nodeIndex.get(`${id}:${side || 0}`);
       return i === undefined ? null : { x: this.x[i], y: this.y[i] };
     }
   }

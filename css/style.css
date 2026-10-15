@@ -13,8 +13,6 @@
   --ok: #2c8f5c;
   --warn: #c98a12;
   --bad: #cc3426;
-  --tension: #c4402f;
-  --compression: #2f6db0;
   --m-timber: #a2723c;
   --m-steel: #5b7185;
   --font-display: "Big Shoulders Text", "Arial Narrow", "Roboto Condensed", sans-serif;
@@ -27,7 +25,6 @@
     --paper: #0d1720; --sheet: #112130; --ink: #dbe5ee; --ink-soft: #93a4b3; --rule: #23384a;
     --accent: #e0704c; --accent-ink: #1a0c07; --earth: #3b3328; --earth-line: #5a4d3b;
     --ok: #46c183; --warn: #e8b23f; --bad: #ff5a47;
-    --tension: #ff6b57; --compression: #5aa2ec;
     --m-timber: #cf9a5c; --m-steel: #92a9bf;
     color-scheme: dark;
   }
@@ -36,7 +33,6 @@
   --paper: #0d1720; --sheet: #112130; --ink: #dbe5ee; --ink-soft: #93a4b3; --rule: #23384a;
   --accent: #e0704c; --accent-ink: #1a0c07; --earth: #3b3328; --earth-line: #5a4d3b;
   --ok: #46c183; --warn: #e8b23f; --bad: #ff5a47;
-  --tension: #ff6b57; --compression: #5aa2ec;
   --m-timber: #cf9a5c; --m-steel: #92a9bf;
   color-scheme: dark;
 }
@@ -282,6 +278,24 @@ textarea {
 .verdict[data-v="analysed"] { color: var(--ink); }
 .verdict-text { margin: 0; font-size: 13.5px; }
 .seg { display: flex; gap: 0; }
+.seg.proj button { padding: 6px 12px; font-weight: 500; }
+.levelbar {
+  position: absolute;
+  top: 12px; left: 40px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  max-width: calc(100% - 52px);
+  background: color-mix(in srgb, var(--sheet) 88%, transparent);
+  padding: 4px 6px;
+  border-radius: var(--r);
+}
+.levelbar-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-soft); }
+.levels { display: flex; flex-wrap: wrap; gap: 4px; }
+.levels button {
+  border: 1px solid var(--rule); background: var(--sheet); border-radius: var(--r);
+  padding: 3px 8px; cursor: pointer; font-family: var(--font-data); font-size: 12px;
+}
+.levels button[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.levels button small { opacity: 0.7; margin-left: 4px; }
 .seg button { border-radius: 0; flex: 1; }
 .seg button:first-child { border-radius: var(--r) 0 0 var(--r); }
 .seg button:last-child { border-radius: 0 var(--r) var(--r) 0; border-left: 0; }

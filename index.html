@@ -18,6 +18,11 @@
       <span class="brand-name">Bridge Load Lab</span>
     </div>
 
+    <div class="seg proj" role="group" aria-label="View" id="projSeg">
+      <button type="button" data-proj="side" aria-pressed="true" title="Side view (T to switch)">Side view</button>
+      <button type="button" data-proj="top" aria-pressed="false" title="Top view (T to switch)">Top view</button>
+    </div>
+
     <div class="group" role="toolbar" aria-label="Tools" id="tools">
       <button type="button" class="tool" data-tool="build" title="Build members (B)"><span class="k">B</span>Build</button>
       <button type="button" class="tool" data-tool="select" title="Select and move (V)"><span class="k">V</span>Select</button>
@@ -36,6 +41,10 @@
   <main class="stage">
     <div class="canvas-wrap" id="canvasWrap">
       <canvas id="view" aria-label="Bridge drawing area"></canvas>
+      <div class="levelbar" id="levelBar" hidden>
+        <span class="levelbar-label">Height</span>
+        <div class="levels" id="levels" role="group" aria-label="Height to build at"></div>
+      </div>
       <div class="hint" id="hint" aria-live="polite"></div>
       <div class="toast" id="toast" role="status" hidden></div>
       <div class="simbar" id="simbar" hidden>
@@ -94,6 +103,10 @@
           <label class="field" for="gap">
             <span>Gap between tables <output id="gapOut">50 cm</output></span>
             <input id="gap" type="range" min="20" max="120" step="1" value="50">
+          </label>
+          <label class="field" for="deckW">
+            <span>Deck width (front truss to back truss)</span>
+            <span class="num-input"><input id="deckW" type="number" min="2" max="40" step="0.5"><em>cm</em></span>
           </label>
           <label class="check" for="pier"><input id="pier" type="checkbox"> Support block in the middle</label>
           <div class="row">
