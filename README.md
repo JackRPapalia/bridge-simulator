@@ -2,7 +2,7 @@
 
 A model-bridge physics simulator that runs in the browser. Build a truss bridge between two tables, put weights on it, run a load test and watch it hold or collapse. When the test ends you get a report of the weak points.
 
-All lengths are in centimetres. Every member is cut from the same piece: one material and one cross-section, which you set in the Piece panel.
+All lengths are in centimetres. Every member is cut from the same piece: by default a 1 × 1 cm balsa stick, up to 30 cm long. You can change it in the Piece panel.
 
 ## Run it
 

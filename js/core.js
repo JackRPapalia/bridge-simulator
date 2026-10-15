@@ -22,7 +22,7 @@
   const MATERIAL_ORDER = ['balsa', 'basswood', 'birch', 'pine', 'spaghetti', 'aluminium', 'steel'];
 
   /* The piece every member is cut from. width lies in the bridge's plane, thick is out of plane. */
-  const DEFAULT_PIECE = { material: 'basswood', width: 0.01, thick: 0.003, maxLen: 0.3 };
+  const DEFAULT_PIECE = { material: 'balsa', width: 0.01, thick: 0.01, maxLen: 0.3 };
 
   /* Section and strength properties of the piece (solid rectangle). Cached per piece spec. */
   let cacheKey = '';
@@ -31,7 +31,7 @@
     const p = piece || DEFAULT_PIECE;
     const key = `${p.material}|${p.width}|${p.thick}|${p.maxLen}`;
     if (key === cacheKey) return cacheVal;
-    const m = MATERIALS[p.material] || MATERIALS.basswood;
+    const m = MATERIALS[p.material] || MATERIALS.balsa;
     const w = p.width;
     const t = p.thick;
     const big = Math.max(w, t);

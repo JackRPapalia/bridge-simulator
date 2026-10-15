@@ -78,13 +78,13 @@ test('plain deck collapses or sags heavily under 10 kg', () => {
 });
 
 test('overloaded truss breaks members, report ranks them', () => {
-  const m = BS.makePreset('warren', 0.5, false, 40);
+  const m = BS.makePreset('warren', 0.5, false, 150);
   const sim = runSim(m, 14);
   const rep = BS.buildReport(m, sim);
   console.log(`        outcome ${sim.outcome}, broke ${sim.events.map((e) => 'M' + e.id + ':' + e.mode).join(', ')}`);
   console.log(`        weakest static: ${rep.weak.slice(0, 3).map((w) => `M${w.id} ${(w.u * 100).toFixed(0)}% ${w.mode}`).join(', ')}`);
-  const est = BS.loadFactor(rep.static) * 40;
-  const first = sim.events[0].load * 40;
+  const est = BS.loadFactor(rep.static) * 150;
+  const first = sim.events[0].load * 150;
   console.log(`        static capacity ${BS.kgLabel(est)}, live test first break at ${BS.kgLabel(first)}`);
   assert(Math.abs(first - est) / est < 0.1, 'live failure load should match static estimate within 10%');
   assert(rep.weak[0].u > 1);
@@ -118,7 +118,7 @@ test('single piece: thicker piece carries more, all members share it', () => {
   const k1 = BS.loadFactor(BS.analyze(m));
   m.piece = { ...m.piece, thick: m.piece.thick * 2 };
   const k2 = BS.loadFactor(BS.analyze(m));
-  console.log(`        0.3 cm thick: ${BS.kgLabel(k1 * 2)}, 0.6 cm thick: ${BS.kgLabel(k2 * 2)}`);
+  console.log(`        thickness x1: ${BS.kgLabel(k1 * 2)}, x2: ${BS.kgLabel(k2 * 2)}`);
   assert(k2 > k1 * 1.5);
 });
 

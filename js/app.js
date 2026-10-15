@@ -9,7 +9,7 @@
     model: null,
     mode: 'build',          // build | sim | results
     tool: 'build',
-    mass: 2,
+    mass: 10,
     snap: true,
     live: false,
     liveChecks: null,
@@ -45,7 +45,11 @@
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return null;
       const m = JSON.parse(raw);
-      return validModel(m) ? m : null;
+      if (!validModel(m)) return null;
+      // Designs saved with the earlier default piece (basswood 1 x 0.3 cm) move to the 1 x 1 cm balsa stick.
+      const p = m.piece;
+      if (p.material === 'basswood' && p.width === 0.01 && p.thick === 0.003 && p.maxLen === 0.3) m.piece = { ...BS.DEFAULT_PIECE };
+      return m;
     } catch (e) { return null; }
   }
   function validModel(m) {

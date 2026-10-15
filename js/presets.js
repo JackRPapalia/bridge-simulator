@@ -118,7 +118,7 @@
     const model = BS.createModel(gap);
     model.pier = !!pier;
     if (piece) model.piece = { ...piece };
-    PRESETS[key].build(model, gap, mass == null ? 2 : mass);
+    PRESETS[key].build(model, gap, mass == null ? 10 : mass);
     return model;
   }
 
