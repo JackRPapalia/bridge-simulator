@@ -1,15 +1,16 @@
-/* Starter designs, generated to fit the current gap. */
+/* Starter designs, generated to fit the current gap (model scale, roughly 8 cm panels). */
 (function (root) {
   'use strict';
   const BS = root.BS;
 
-  const panels = (gap) => Math.max(2, Math.round(gap / 3));
+  const panels = (gap) => Math.max(2, Math.round(gap / 0.08));
+  const r3 = (v) => Math.round(v * 1000) / 1000; // keep coordinates on a 1 mm grid
 
-  function deck(model, gap, n, mat) {
+  function deck(model, gap, n) {
     const dx = gap / n;
     const B = [];
-    for (let i = 0; i <= n; i++) B.push(BS.addNode(model, i * dx, 0, i === 0 || i === n));
-    for (let i = 0; i < n; i++) BS.addMember(model, B[i].id, B[i + 1].id, mat || 'ibeam');
+    for (let i = 0; i <= n; i++) B.push(BS.addNode(model, r3(i * dx), 0, i === 0 || i === n));
+    for (let i = 0; i < n; i++) BS.addMember(model, B[i].id, B[i + 1].id);
     return B;
   }
 
@@ -18,23 +19,25 @@
     model.loads.push({ id: model.nextId++, mass, node: mid.id });
   }
 
+  const depth = (gap) => r3(Math.min(0.1, Math.max(0.05, gap * 0.16)));
+
   const PRESETS = {
     pratt: {
       name: 'Pratt truss',
       build(model, gap, mass) {
         const n = panels(gap);
         const dx = gap / n;
-        const h = 3;
+        const h = depth(gap);
         const B = deck(model, gap, n);
         const T = [];
-        for (let i = 1; i < n; i++) T[i] = BS.addNode(model, i * dx, h, false);
-        for (let i = 1; i < n - 1; i++) BS.addMember(model, T[i].id, T[i + 1].id, 'steel');
-        BS.addMember(model, B[0].id, T[1].id, 'steel');
-        BS.addMember(model, B[n].id, T[n - 1].id, 'steel');
-        for (let i = 1; i < n; i++) BS.addMember(model, B[i].id, T[i].id, 'steel');
+        for (let i = 1; i < n; i++) T[i] = BS.addNode(model, r3(i * dx), h, false);
+        for (let i = 1; i < n - 1; i++) BS.addMember(model, T[i].id, T[i + 1].id);
+        BS.addMember(model, B[0].id, T[1].id);
+        BS.addMember(model, B[n].id, T[n - 1].id);
+        for (let i = 1; i < n; i++) BS.addMember(model, B[i].id, T[i].id);
         for (let i = 1; i < n - 1; i++) {
-          if (i + 0.5 < n / 2) BS.addMember(model, T[i].id, B[i + 1].id, 'steel');
-          else BS.addMember(model, T[i + 1].id, B[i].id, 'steel');
+          if (i + 0.5 < n / 2) BS.addMember(model, T[i].id, B[i + 1].id);
+          else BS.addMember(model, T[i + 1].id, B[i].id);
         }
         centreLoad(model, B, mass);
       },
@@ -44,14 +47,14 @@
       build(model, gap, mass) {
         const n = panels(gap);
         const dx = gap / n;
-        const h = 2.6;
+        const h = depth(gap);
         const B = deck(model, gap, n);
         const T = [];
-        for (let i = 0; i < n; i++) T[i] = BS.addNode(model, (i + 0.5) * dx, h, false);
-        for (let i = 0; i < n - 1; i++) BS.addMember(model, T[i].id, T[i + 1].id, 'steel');
+        for (let i = 0; i < n; i++) T[i] = BS.addNode(model, r3((i + 0.5) * dx), h, false);
+        for (let i = 0; i < n - 1; i++) BS.addMember(model, T[i].id, T[i + 1].id);
         for (let i = 0; i < n; i++) {
-          BS.addMember(model, B[i].id, T[i].id, 'timber');
-          BS.addMember(model, T[i].id, B[i + 1].id, 'timber');
+          BS.addMember(model, B[i].id, T[i].id);
+          BS.addMember(model, T[i].id, B[i + 1].id);
         }
         centreLoad(model, B, mass);
       },
@@ -61,44 +64,43 @@
       build(model, gap, mass) {
         const n = panels(gap);
         const dx = gap / n;
-        const rise = Math.min(6, gap * 0.3);
+        const rise = r3(gap * 0.25);
         const B = deck(model, gap, n);
         const A = [];
         for (let i = 0; i <= n; i++) {
           const x = i * dx;
-          const y = -rise + (rise - 0.8) * (4 * x * (gap - x)) / (gap * gap);
-          A.push(i === 0 || i === n ? BS.addNode(model, x, -rise, true) : BS.addNode(model, x, y, false));
+          const y = -rise + rise * 0.85 * (4 * x * (gap - x)) / (gap * gap);
+          A.push(BS.addNode(model, r3(x), r3(i === 0 || i === n ? -rise : y), i === 0 || i === n));
         }
-        for (let i = 0; i < n; i++) BS.addMember(model, A[i].id, A[i + 1].id, 'ibeam');
-        for (let i = 1; i < n; i++) BS.addMember(model, B[i].id, A[i].id, 'steel');
+        for (let i = 0; i < n; i++) BS.addMember(model, A[i].id, A[i + 1].id);
+        for (let i = 1; i < n; i++) BS.addMember(model, B[i].id, A[i].id);
         for (let i = 0; i < n; i++) {
-          if (i < n / 2) BS.addMember(model, B[i].id, A[i + 1].id, 'steel');
-          else BS.addMember(model, A[i].id, B[i + 1].id, 'steel');
+          if (i < n / 2) BS.addMember(model, B[i].id, A[i + 1].id);
+          else BS.addMember(model, A[i].id, B[i + 1].id);
         }
         centreLoad(model, B, mass);
       },
     },
     stayed: {
-      name: 'Cable-stayed',
+      name: 'Towers and stays',
       build(model, gap, mass) {
         const n = panels(gap);
-        const H = Math.min(9, Math.max(5, gap * 0.4));
+        const H = r3(gap * 0.35);
         const B = deck(model, gap, n);
         const tower = (x0, dir) => {
-          const foot = BS.addNode(model, x0 - dir * 2, 0, true);
-          const top = BS.addNode(model, x0 - dir * 1, H, false);
-          const back = BS.addNode(model, x0 - dir * Math.min(10, gap / 2), 0, true);
-          const base = B[dir > 0 ? 0 : n];
-          BS.addMember(model, foot.id, top.id, 'ibeam');
-          BS.addMember(model, base.id, top.id, 'ibeam');
-          BS.addMember(model, back.id, top.id, 'cable');
+          const foot = BS.addNode(model, r3(x0 - dir * gap * 0.06), 0, true);
+          const top = BS.addNode(model, r3(x0 - dir * gap * 0.03), H, false);
+          const back = BS.addNode(model, r3(x0 - dir * gap * 0.25), 0, true);
+          BS.addMember(model, foot.id, top.id);
+          BS.addMember(model, B[dir > 0 ? 0 : n].id, top.id);
+          BS.addMember(model, back.id, top.id);
           return top;
         };
         const L = tower(0, 1);
         const R = tower(gap, -1);
         for (let i = 1; i < n; i++) {
-          if (i <= n / 2) BS.addMember(model, L.id, B[i].id, 'cable');
-          if (i >= n / 2) BS.addMember(model, R.id, B[i].id, 'cable');
+          if (i <= n / 2) BS.addMember(model, L.id, B[i].id);
+          if (i >= n / 2) BS.addMember(model, R.id, B[i].id);
         }
         centreLoad(model, B, mass);
       },
@@ -106,16 +108,17 @@
     plank: {
       name: 'Plain deck (no truss)',
       build(model, gap, mass) {
-        const B = deck(model, gap, panels(gap), 'ibeam');
+        const B = deck(model, gap, panels(gap));
         centreLoad(model, B, mass);
       },
     },
   };
 
-  function makePreset(key, gap, pier, mass) {
+  function makePreset(key, gap, pier, mass, piece) {
     const model = BS.createModel(gap);
     model.pier = !!pier;
-    PRESETS[key].build(model, gap, mass == null ? 10000 : mass);
+    if (piece) model.piece = { ...piece };
+    PRESETS[key].build(model, gap, mass == null ? 2 : mass);
     return model;
   }
 

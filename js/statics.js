@@ -67,13 +67,14 @@
       if (used.has(nd.id) && !nd.fixed) { dof.set(nd.id, n); dofNode.push(nd.id, nd.id); n += 2; }
     }
 
+    const mat = BS.memberMat(model);
     const geom = model.members.map((m) => {
       const a = nm.get(m.a);
       const b = nm.get(m.b);
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const L = Math.hypot(dx, dy);
-      return { id: m.id, m, a: m.a, b: m.b, L, c: dx / L, s: dy / L, mat: BS.MATERIALS[m.mat] };
+      return { id: m.id, m, a: m.a, b: m.b, L, c: dx / L, s: dy / L, mat };
     });
     const geomById = new Map(geom.map((g) => [g.id, g]));
 
@@ -212,16 +213,15 @@
   };
 
   function adviceFor(check, L) {
-    const isBeam = check.mat.key === 'ibeam';
     switch (check.mode) {
       case 'buckling':
-        return `Buckles at ${L.toFixed(1)} m long. Buckling strength falls with length squared, so add a joint at midspan and brace it${isBeam ? '' : ', or switch to I-beam'}.`;
+        return `Buckles at ${BS.cm(L)} long. Buckling strength falls with length squared, so split it with a joint and brace that joint.`;
       case 'compression':
-        return `Crushes under compression. ${isBeam ? 'Share' : 'Use a bigger section (I-beam) or share'} the load with a second member.`;
+        return 'Crushes under compression. Make the truss deeper so the chords carry less force, or add a member that shares the push.';
       case 'tension':
-        return `Pulled past its tensile strength. ${check.mat.key === 'timber' ? 'Use steel, double' : 'Double'} it up or add a cable alongside.`;
+        return 'Pulled past its tensile strength. Make the truss deeper, or add a diagonal that shares the pull.';
       case 'bending':
-        return `The weight sits mid-beam and bends it. Put a joint under the weight${isBeam ? ' or shorten this beam' : ', shorten this beam, or use the I-beam'}.`;
+        return 'The weight sits between joints and bends this piece. Put a joint under the weight or shorten this piece.';
       default:
         return 'Carries little force at this load.';
     }
@@ -261,7 +261,7 @@
     if (!res.ok && res.reason === 'mechanism') {
       report.tips.push(`Joint J${res.nodeId} can move without stretching any member, so the bridge folds like a hinge. Add diagonals until every panel is a triangle.`);
     } else if (!res.ok && res.reason === 'nosupport') {
-      report.tips.push('Nothing is anchored. Use the Anchor tool on the cliff edges to pin the bridge to the ground.');
+      report.tips.push('Nothing is anchored. Use the Anchor tool on the table edges to pin the bridge down.');
     }
     if (res.ok) {
       const slack = res.members.filter((m) => m.slack && m.mat.tensionOnly);
@@ -269,18 +269,20 @@
       const bending = ranked.filter((c) => c.mode === 'bending' && c.u > 0.5);
       if (bending.length) report.tips.push('Weights placed between joints bend the beam under them. Trusses are strongest when loads land on joints.');
       const lazy = checks.filter((c) => c.u < 0.03).length;
-      if (lazy >= 3 && report.peakU < 1) report.tips.push(`${lazy} members carry almost nothing at this load. Some may still be needed for stability, but they are candidates for a cheaper material.`);
+      if (lazy >= 3 && report.peakU < 1) report.tips.push(`${lazy} members carry almost nothing at this load. Some may still be needed for stability, but they are candidates to remove.`);
       if (report.safeLoad != null && Number.isFinite(report.safeLoad)) {
         const ratio = report.safeLoad / totalLoad;
-        if (ratio < 1) report.tips.push(`The first member gives way at about ${(report.safeLoad / 1000).toFixed(1)} t, ${((1 - ratio) * 100).toFixed(0)}% short of the ${(totalLoad / 1000).toFixed(1)} t you placed.`);
+        if (ratio < 1) report.tips.push(`The first member gives way at about ${BS.kgLabel(report.safeLoad)}, ${((1 - ratio) * 100).toFixed(0)}% short of the ${BS.kgLabel(totalLoad)} you placed.`);
         else if (ratio < 1.5) report.tips.push(`Safety factor is ${ratio.toFixed(2)}. Engineers usually aim for 1.5 or more on bridges.`);
       }
       if (res.maxDeflection > 0) {
         const span = model.gap;
         const limit = span / 250;
-        if (res.maxDeflection > limit) report.tips.push(`It sags ${(res.maxDeflection * 1000).toFixed(0)} mm, more than the usual L/250 limit of ${(limit * 1000).toFixed(0)} mm for this span. Make it deeper.`);
+        if (res.maxDeflection > limit) report.tips.push(`It sags ${BS.cm(res.maxDeflection, 2)}, more than the usual L/250 limit of ${BS.cm(limit, 2)} for this span. Make it deeper.`);
       }
     }
+    const stats = BS.designStats(model);
+    if (stats.overLong) report.tips.push(`${stats.overLong} member${stats.overLong > 1 ? 's are' : ' is'} longer than your ${BS.cm(BS.memberMat(model).maxLen)} piece. Add joints so each fits on one piece.`);
     if (sim && sim.events.length && res.ok) {
       const first = sim.events[0];
       if (!report.weak.some((w) => w.id === first.id)) {

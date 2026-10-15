@@ -15,14 +15,13 @@
   const rgb = (c, a) => (a == null ? `rgb(${c[0]},${c[1]},${c[2]})` : `rgba(${c[0]},${c[1]},${c[2]},${a})`);
   const mix = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
 
-  const TOKENS = ['paper', 'sheet', 'ink', 'ink-soft', 'rule', 'accent', 'earth', 'earth-line', 'water',
-    'water-deep', 'ok', 'warn', 'bad', 'tension', 'compression', 'm-timber', 'm-steel', 'm-ibeam', 'm-cable'];
+  const TOKENS = ['paper', 'sheet', 'ink', 'ink-soft', 'rule', 'accent', 'earth', 'earth-line', 'ok', 'warn', 'bad', 'tension', 'compression', 'm-timber', 'm-steel'];
 
   class Renderer {
     constructor(canvas) {
       this.canvas = canvas;
       this.ctx = canvas.getContext('2d');
-      this.cam = { x: 9, y: 0, scale: 30 };
+      this.cam = { x: 0.25, y: 0, scale: 1200 };
       this.dpr = 1;
       this.readColors();
     }
@@ -48,12 +47,11 @@
     }
 
     fit(gap) {
-      const span = gap + 14;
-      const sx = this.w / span;
-      const sy = this.h / 22;
-      this.cam.scale = Math.max(6, Math.min(sx, sy));
+      const sx = this.w / (gap * 1.7);
+      const sy = this.h / (gap * 1.25);
+      this.cam.scale = Math.max(100, Math.min(sx, sy));
       this.cam.x = gap / 2;
-      this.cam.y = this.h / this.cam.scale > 24 ? -1 : 0.5;
+      this.cam.y = -0.12 * gap;
     }
 
     sx(x) { return (x - this.cam.x) * this.cam.scale + this.w / 2; }
@@ -68,9 +66,9 @@
       return bad;
     }
 
-    matColor(key) { return this.c['m-' + key]; }
+    matColor(mat) { return mat.E >= 50e9 ? this.c['m-steel'] : this.c['m-timber']; }
 
-    memberWidth(mat) { return Math.max(1.6, Math.min(12, mat.width * this.cam.scale * 0.9)); }
+    memberWidth(mat) { return Math.max(1.6, Math.min(14, mat.width * this.cam.scale)); }
 
     /* ------------------------------------------------------------------ */
     draw(st) {
@@ -82,7 +80,6 @@
 
       const terrain = BS.terrainOf(st.model);
       this.drawGrid();
-      this.drawWater(terrain, st.clock);
       this.drawTerrain(terrain);
       this.drawSpan(terrain);
 
@@ -94,49 +91,43 @@
       if (st.tooltip) this.drawTooltip(st.tooltip);
     }
 
+    /* Centimetre grid with labelled major lines along the top and left edges. */
     drawGrid() {
       const ctx = this.ctx;
       const s = this.cam.scale;
-      const x0 = Math.floor(this.wx(0));
-      const x1 = Math.ceil(this.wx(this.w));
-      const y0 = Math.floor(this.wy(this.h));
-      const y1 = Math.ceil(this.wy(0));
-      const minor = s >= 14;
+      const steps = [0.01, 0.05, 0.1, 0.5, 1, 5];
+      const minor = steps.find((st) => st * s >= 7) || 5;
+      const major = minor === 0.01 ? 0.1 : minor * 10;
+      const per = Math.round(major / minor);
+      const i0 = Math.floor(this.wx(0) / minor);
+      const i1 = Math.ceil(this.wx(this.w) / minor);
+      const j0 = Math.floor(this.wy(this.h) / minor);
+      const j1 = Math.ceil(this.wy(0) / minor);
       ctx.lineWidth = 1;
-      for (let x = x0; x <= x1; x++) {
-        const major = x % 5 === 0;
-        if (!major && !minor) continue;
-        ctx.strokeStyle = rgb(this.c.rule, major ? 0.9 : 0.45);
-        const px = Math.round(this.sx(x)) + 0.5;
+      const labels = [];
+      for (let i = i0; i <= i1; i++) {
+        const isMajor = i % per === 0;
+        ctx.strokeStyle = rgb(this.c.rule, isMajor ? 0.95 : 0.4);
+        const px = Math.round(this.sx(i * minor)) + 0.5;
         ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, this.h); ctx.stroke();
+        if (isMajor) labels.push(['x', px, i * minor]);
       }
-      for (let y = y0; y <= y1; y++) {
-        const major = y % 5 === 0;
-        if (!major && !minor) continue;
-        ctx.strokeStyle = rgb(this.c.rule, major ? 0.9 : 0.45);
-        const py = Math.round(this.sy(y)) + 0.5;
+      for (let j = j0; j <= j1; j++) {
+        const isMajor = j % per === 0;
+        ctx.strokeStyle = rgb(this.c.rule, isMajor ? 0.95 : 0.4);
+        const py = Math.round(this.sy(j * minor)) + 0.5;
         ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(this.w, py); ctx.stroke();
+        if (isMajor) labels.push(['y', py, j * minor]);
       }
-    }
-
-    drawWater(terrain, clock) {
-      const ctx = this.ctx;
-      const top = this.sy(terrain.waterY);
-      if (top > this.h) return;
-      const grad = ctx.createLinearGradient(0, top, 0, this.h);
-      grad.addColorStop(0, rgb(this.c.water, 0.85));
-      grad.addColorStop(1, rgb(this.c['water-deep'], 0.95));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(0, this.h);
-      const t = clock || 0;
-      for (let px = 0; px <= this.w + 8; px += 8) {
-        const wx = this.wx(px);
-        ctx.lineTo(px, top + Math.sin(wx * 1.3 + t * 1.6) * 2 + Math.sin(wx * 0.37 - t) * 1.5);
+      ctx.font = `400 10px ${this.font.data}`;
+      ctx.fillStyle = rgb(this.c['ink-soft'], 0.8);
+      for (const [axis, pos, v] of labels) {
+        const t = `${Math.round(v * 100)}`;
+        if (axis === 'x') { ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText(t, pos + 3, 3); }
+        else { ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(t, 3, pos - 2); }
       }
-      ctx.lineTo(this.w, this.h);
-      ctx.closePath();
-      ctx.fill();
+      ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+      ctx.fillText('cm', 3, 15);
     }
 
     drawTerrain(terrain) {
@@ -158,7 +149,9 @@
         ctx.strokeStyle = rgb(this.c.ink);
         ctx.lineWidth = 2;
         ctx.beginPath();
-        if (r.pier) {
+        if (r.floor) {
+          ctx.moveTo(x0, y0); ctx.lineTo(x1, y0);
+        } else if (r.pier) {
           ctx.moveTo(x0, y1); ctx.lineTo(x0, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y1);
         } else if (r.x1 <= 0.001) {
           ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y1);
@@ -172,7 +165,7 @@
     /* Engineering dimension line for the clear span. */
     drawSpan(terrain) {
       const ctx = this.ctx;
-      const y = this.sy(terrain.waterY + 1.4);
+      const y = this.sy(terrain.floorY + Math.min(0.06, terrain.gap * 0.08));
       const a = this.sx(0); const b = this.sx(terrain.gap);
       ctx.strokeStyle = rgb(this.c['ink-soft'], 0.8);
       ctx.fillStyle = rgb(this.c['ink-soft']);
@@ -184,7 +177,7 @@
       ctx.stroke();
       const tick = (x, d) => { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + d * 8, y - 3); ctx.lineTo(x + d * 8, y + 3); ctx.closePath(); ctx.fill(); };
       tick(a, 1); tick(b, -1);
-      const label = `CLEAR SPAN ${terrain.gap.toFixed(1)} m`;
+      const label = `CLEAR SPAN ${BS.cm(terrain.gap)}`;
       ctx.font = `500 11px ${this.font.data}`;
       const tw = ctx.measureText(label).width;
       ctx.fillStyle = rgb(this.c.sheet);
@@ -199,6 +192,7 @@
       const ctx = this.ctx;
       const model = st.model;
       const nm = BS.nodeMap(model);
+      const mat = BS.memberMat(model);
       const checks = st.mode === 'results' ? st.report?.checks : st.live ? st.liveChecks : null;
       const brokenOrder = new Map();
       if (st.mode === 'results' && st.sim) st.sim.events.forEach((e, i) => brokenOrder.set(e.id, i + 1));
@@ -211,27 +205,22 @@
         if (!hl) continue;
         const a = nm.get(m.a); const b = nm.get(m.b);
         ctx.strokeStyle = rgb(this.c.accent, 0.35);
-        ctx.lineWidth = this.memberWidth(BS.MATERIALS[m.mat]) + 10;
+        ctx.lineWidth = this.memberWidth(mat) + 10;
         ctx.beginPath(); ctx.moveTo(this.sx(a.x), this.sy(a.y)); ctx.lineTo(this.sx(b.x), this.sy(b.y)); ctx.stroke();
       }
 
       for (const m of model.members) {
         const a = nm.get(m.a); const b = nm.get(m.b);
-        const mat = BS.MATERIALS[m.mat];
         const chk = checks?.get(m.id);
-        let col = this.matColor(m.mat);
+        const tooLong = !checks && BS.memberLength(model, m, nm) > mat.maxLen + 1e-9;
+        let col = tooLong ? this.c.bad : this.matColor(mat);
         if (chk) col = chk.mode === 'slack' ? this.c['ink-soft'] : this.utilColor(chk.u);
         const broken = brokenOrder.has(m.id);
         ctx.strokeStyle = rgb(col);
         ctx.lineWidth = this.memberWidth(mat);
-        if (broken || chk?.mode === 'slack') ctx.setLineDash([ctx.lineWidth * 1.4, ctx.lineWidth * 1.4]);
+        if (broken || tooLong || chk?.mode === 'slack') ctx.setLineDash([ctx.lineWidth * 1.4, ctx.lineWidth * 1.4]);
         ctx.beginPath(); ctx.moveTo(this.sx(a.x), this.sy(a.y)); ctx.lineTo(this.sx(b.x), this.sy(b.y)); ctx.stroke();
         ctx.setLineDash([]);
-        if (m.mat === 'ibeam' && !chk) {
-          ctx.strokeStyle = rgb(this.c.sheet, 0.5);
-          ctx.lineWidth = Math.max(1, this.memberWidth(mat) * 0.25);
-          ctx.beginPath(); ctx.moveTo(this.sx(a.x), this.sy(a.y)); ctx.lineTo(this.sx(b.x), this.sy(b.y)); ctx.stroke();
-        }
       }
 
       this.drawPreview(st);
@@ -265,17 +254,18 @@
       const p = st.preview;
       if (!p) return;
       const ctx = this.ctx;
-      const mat = BS.MATERIALS[st.material];
-      ctx.strokeStyle = p.valid ? rgb(this.matColor(st.material), 0.75) : rgb(this.c.bad, 0.8);
+      const mat = BS.memberMat(st.model);
+      ctx.strokeStyle = p.valid ? rgb(this.matColor(mat), 0.75) : rgb(this.c.bad, 0.8);
       ctx.lineWidth = this.memberWidth(mat);
       ctx.setLineDash([6, 5]);
       ctx.beginPath(); ctx.moveTo(this.sx(p.x0), this.sy(p.y0)); ctx.lineTo(this.sx(p.x1), this.sy(p.y1)); ctx.stroke();
       ctx.setLineDash([]);
       const L = Math.hypot(p.x1 - p.x0, p.y1 - p.y0);
-      const text = p.reason || `${L.toFixed(2)} m`;
+      const text = p.reason || BS.cm(L);
       ctx.font = `500 12px ${this.font.data}`;
-      const mx = this.sx((p.x0 + p.x1) / 2); const my = this.sy((p.y0 + p.y1) / 2) - 14;
       const tw = ctx.measureText(text).width;
+      const mx = Math.max(tw / 2 + 8, Math.min(this.w - tw / 2 - 8, this.sx((p.x0 + p.x1) / 2)));
+      const my = Math.max(14, Math.min(this.h - 14, this.sy((p.y0 + p.y1) / 2) - 14));
       ctx.fillStyle = rgb(p.valid ? this.c.ink : this.c.bad);
       ctx.fillRect(mx - tw / 2 - 5, my - 9, tw + 10, 18);
       ctx.fillStyle = rgb(this.c.sheet);
@@ -322,7 +312,7 @@
     }
 
     weightSize(mass) {
-      const w = 0.9 + 0.38 * Math.cbrt(mass / 1000);
+      const w = 0.03 + 0.025 * Math.cbrt(mass);
       return { w, h: w * 0.62 };
     }
 
@@ -348,7 +338,7 @@
         ctx.font = `600 ${fs}px ${this.font.data}`;
         ctx.fillStyle = rgb(this.c.sheet);
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        const label = load.mass >= 1000 ? `${+(load.mass / 1000).toFixed(load.mass % 1000 ? 1 : 0)} t` : `${load.mass} kg`;
+        const label = BS.kgLabel(load.mass);
         ctx.fillText(label, x, y - ph / 2);
         ctx.fillStyle = rgb(this.c.accent);
         ctx.beginPath(); ctx.moveTo(x, y + 4); ctx.lineTo(x - 4, y - 2); ctx.lineTo(x + 4, y - 2); ctx.closePath(); ctx.fill();
@@ -428,12 +418,6 @@
         ctx.strokeStyle = rgb(this.c.bad, Math.min(1, d.life / 1.5));
         ctx.lineWidth = this.memberWidth(d.mat);
         ctx.beginPath(); ctx.moveTo(this.sx(d.x - hx), this.sy(d.y - hy)); ctx.lineTo(this.sx(d.x + hx), this.sy(d.y + hy)); ctx.stroke();
-      }
-      for (const s of sim.splashes) {
-        const r = (0.4 + s.t * 2.5) * this.cam.scale;
-        ctx.strokeStyle = rgb(this.c.sheet, Math.max(0, 1 - s.t / 1.2));
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.ellipse(this.sx(s.x), this.sy(sim.terrain.waterY), r, r * 0.25, 0, Math.PI, Math.PI * 2); ctx.stroke();
       }
       this.drawNodes(st, (n) => sim.nodePos(n.id));
       this.drawWeights(st, sim.weights.map((w) => ({ load: w.load, pos: { x: x[w.p], y: y[w.p] } })));

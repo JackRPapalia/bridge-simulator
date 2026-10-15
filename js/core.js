@@ -1,43 +1,62 @@
-/* Core data: materials, the bridge model, terrain and member capacity checks.
- * Units: metres, kilograms, newtons, seconds. World y points up; the deck level is y = 0. */
+/* Core data: the piece material, the bridge model, terrain and member capacity checks.
+ * Every member is cut from the same piece: one material, one cross-section.
+ * Internally everything is SI (metres, kilograms, newtons, seconds); the UI shows centimetres.
+ * World y points up; the table tops are at y = 0. */
 (function (root) {
   'use strict';
   const BS = (root.BS = root.BS || {});
 
   const G = 9.81;
 
-  // Section properties are for one representative member of each kind.
-  // I is the weak-axis second moment (governs buckling); S is the section modulus for bending.
+  // Approximate properties along the grain / for the solid material.
+  // E: stiffness, ft/fc/fb: tension, compression and bending strength (Pa), density kg/m³.
   const MATERIALS = {
-    timber: {
-      key: 'timber', name: 'Timber', note: '100 mm square glulam',
-      E: 11e9, A: 0.01, I: 8.33e-6, S: 1.667e-4, fy: 30e6, density: 600,
-      costPerM: 40, maxLen: 10, tensionOnly: false, width: 0.16,
-    },
-    steel: {
-      key: 'steel', name: 'Steel tube', note: '100 mm tube, 6.5 mm wall',
-      E: 200e9, A: 0.002, I: 2.5e-6, S: 5e-5, fy: 250e6, density: 7850,
-      costPerM: 120, maxLen: 12, tensionOnly: false, width: 0.12,
-    },
-    ibeam: {
-      key: 'ibeam', name: 'Steel I-beam', note: '300 mm deep, best for decks',
-      E: 200e9, A: 0.006, I: 4e-6, S: 5e-4, fy: 250e6, density: 7850,
-      costPerM: 300, maxLen: 12, tensionOnly: false, width: 0.22,
-    },
-    cable: {
-      key: 'cable', name: 'Steel cable', note: '25 mm strand, tension only',
-      E: 160e9, A: 5e-4, I: 0, S: 0, fy: 1000e6, density: 7850,
-      costPerM: 60, maxLen: 40, tensionOnly: true, width: 0.05,
-    },
+    balsa: { key: 'balsa', name: 'Balsa', E: 3.5e9, ft: 14e6, fc: 12e6, fb: 20e6, density: 160 },
+    basswood: { key: 'basswood', name: 'Basswood', E: 10e9, ft: 40e6, fc: 30e6, fb: 50e6, density: 420 },
+    birch: { key: 'birch', name: 'Birch (craft stick)', E: 12e9, ft: 50e6, fc: 40e6, fb: 70e6, density: 600 },
+    pine: { key: 'pine', name: 'Pine', E: 9e9, ft: 40e6, fc: 30e6, fb: 60e6, density: 450 },
+    spaghetti: { key: 'spaghetti', name: 'Dry spaghetti', E: 4e9, ft: 10e6, fc: 10e6, fb: 15e6, density: 1500 },
+    aluminium: { key: 'aluminium', name: 'Aluminium', E: 69e9, ft: 150e6, fc: 150e6, fb: 150e6, density: 2700 },
+    steel: { key: 'steel', name: 'Steel', E: 200e9, ft: 250e6, fc: 250e6, fb: 250e6, density: 7850 },
   };
-  const MATERIAL_ORDER = ['timber', 'steel', 'ibeam', 'cable'];
+  const MATERIAL_ORDER = ['balsa', 'basswood', 'birch', 'pine', 'spaghetti', 'aluminium', 'steel'];
+
+  /* The piece every member is cut from. width lies in the bridge's plane, thick is out of plane. */
+  const DEFAULT_PIECE = { material: 'basswood', width: 0.01, thick: 0.003, maxLen: 0.3 };
+
+  /* Section and strength properties of the piece (solid rectangle). Cached per piece spec. */
+  let cacheKey = '';
+  let cacheVal = null;
+  function pieceProps(piece) {
+    const p = piece || DEFAULT_PIECE;
+    const key = `${p.material}|${p.width}|${p.thick}|${p.maxLen}`;
+    if (key === cacheKey) return cacheVal;
+    const m = MATERIALS[p.material] || MATERIALS.basswood;
+    const w = p.width;
+    const t = p.thick;
+    const big = Math.max(w, t);
+    const small = Math.min(w, t);
+    cacheKey = key;
+    cacheVal = {
+      ...m,
+      width: w, thick: t, maxLen: p.maxLen,
+      A: w * t,
+      I: (big * small ** 3) / 12,   // weakest axis governs buckling
+      S: (t * w * w) / 6,           // bending in the bridge's plane
+      tensionOnly: false,
+    };
+    return cacheVal;
+  }
+  const memberMat = (model) => pieceProps(model.piece);
 
   const linearMass = (mat) => mat.density * mat.A;
-  const tensionCapacity = (mat) => mat.fy * mat.A;
+  const tensionCapacity = (mat) => mat.ft * mat.A;
   const eulerLoad = (mat, L) => (mat.I > 0 ? (Math.PI * Math.PI * mat.E * mat.I) / (L * L) : 0);
+  const crushCapacity = (mat) => mat.fc * mat.A;
   const compressionCapacity = (mat, L) =>
-    mat.tensionOnly ? 0 : Math.min(mat.fy * mat.A, eulerLoad(mat, L));
-  const bendingCapacity = (mat) => mat.fy * mat.S;
+    mat.tensionOnly ? 0 : Math.min(crushCapacity(mat), eulerLoad(mat, L));
+  const bendingCapacity = (mat) => mat.fb * mat.S;
+  const buckles = (mat, L) => eulerLoad(mat, L) < crushCapacity(mat);
 
   /* Utilisation of a member under axial force N (tension +) and bending moment M.
    * Uses a linear interaction: u = |N|/N_cap + M/M_cap. u >= 1 means failure. */
@@ -50,35 +69,49 @@
       axial = N / tensionCapacity(mat);
       mode = 'tension';
     } else {
-      const yieldCap = mat.fy * mat.A;
-      const euler = eulerLoad(mat, L);
-      axial = -N / Math.min(yieldCap, euler);
-      mode = euler < yieldCap ? 'buckling' : 'compression';
+      axial = -N / compressionCapacity(mat, L);
+      mode = buckles(mat, L) ? 'buckling' : 'compression';
     }
     const Mc = bendingCapacity(mat);
     const bend = M > 0 && Mc > 0 ? M / Mc : 0;
     return { u: axial + bend, axial, bend, mode: bend > axial ? 'bending' : mode, N, M };
   }
 
-  /* ---------- Terrain ---------- */
+  /* ---------- Display helpers (centimetres) ---------- */
+  const cm = (m, d = 1) => `${(m * 100).toFixed(d)} cm`;
+  function newtons(N) {
+    const a = Math.abs(N);
+    return `${N.toFixed(a < 10 ? 2 : a < 1000 ? 1 : 0)} N`;
+  }
+  const kgLabel = (kg) => (kg < 1 ? `${Math.round(kg * 1000)} g` : `${+kg.toFixed(kg < 10 ? 2 : 1)} kg`);
+
+  /* ---------- Terrain: two tables with a gap, floor below ---------- */
   function terrainOf(model) {
     const g = model.gap;
+    const floorY = -Math.max(0.25, 0.6 * g);
     const rects = [
-      { x0: -40, x1: 0, y0: -40, y1: 0 },
-      { x0: g, x1: g + 40, y0: -40, y1: 0 },
+      { x0: -2, x1: 0, y0: floorY, y1: 0 },
+      { x0: g, x1: g + 2, y0: floorY, y1: 0 },
+      { x0: -2, x1: g + 2, y0: floorY - 2, y1: floorY, floor: true },
     ];
-    if (model.pier) rects.push({ x0: g / 2 - 1, x1: g / 2 + 1, y0: -40, y1: -3, pier: true });
-    return { gap: g, rects, waterY: -10 };
+    if (model.pier) {
+      const hw = Math.max(0.015, 0.04 * g);
+      rects.push({ x0: g / 2 - hw, x1: g / 2 + hw, y0: floorY, y1: -0.15 * g, pier: true });
+    }
+    return { gap: g, rects, floorY };
   }
 
   function onTerrain(terrain, x, y) {
-    const e = 0.05;
+    const e = 0.001;
     return terrain.rects.some((r) => x >= r.x0 - e && x <= r.x1 + e && y <= r.y1 + e && y >= r.y0 - e);
   }
 
   /* ---------- Model ---------- */
   function createModel(gap) {
-    return { version: 1, nextId: 1, gap: gap || 18, pier: false, nodes: [], members: [], loads: [] };
+    return {
+      version: 2, nextId: 1, gap: gap || 0.5, pier: false,
+      piece: { ...DEFAULT_PIECE }, nodes: [], members: [], loads: [],
+    };
   }
 
   const cloneModel = (m) => JSON.parse(JSON.stringify(m));
@@ -109,9 +142,9 @@
     return model.members.find((m) => (m.a === a && m.b === b) || (m.a === b && m.b === a)) || null;
   }
 
-  function addMember(model, a, b, mat) {
+  function addMember(model, a, b) {
     if (a === b || findMemberBetween(model, a, b)) return null;
-    const m = { id: model.nextId++, a, b, mat };
+    const m = { id: model.nextId++, a, b };
     model.members.push(m);
     return m;
   }
@@ -164,25 +197,25 @@
 
   function designStats(model) {
     const map = nodeMap(model);
-    let mass = 0;
-    let cost = 0;
+    const mat = memberMat(model);
+    let length = 0;
+    let overLong = 0;
     for (const m of model.members) {
-      const mat = MATERIALS[m.mat];
       const L = memberLength(model, m, map);
-      mass += linearMass(mat) * L;
-      cost += mat.costPerM * L;
+      length += L;
+      if (L > mat.maxLen + 1e-9) overLong++;
     }
     const used = new Set();
     model.members.forEach((m) => { used.add(m.a); used.add(m.b); });
     const joints = model.nodes.filter((n) => used.has(n.id)).length;
-    cost += joints * 150;
     const load = model.loads.reduce((s, l) => s + l.mass, 0);
-    return { mass, cost, joints, members: model.members.length, load };
+    return { mass: linearMass(mat) * length, length, overLong, joints, members: model.members.length, load };
   }
 
   Object.assign(BS, {
-    G, MATERIALS, MATERIAL_ORDER,
-    linearMass, tensionCapacity, eulerLoad, compressionCapacity, bendingCapacity, checkMember,
+    G, MATERIALS, MATERIAL_ORDER, DEFAULT_PIECE, pieceProps, memberMat,
+    linearMass, tensionCapacity, eulerLoad, crushCapacity, compressionCapacity, bendingCapacity, buckles, checkMember,
+    cm, newtons, kgLabel,
     terrainOf, onTerrain,
     createModel, cloneModel, nodeMap, addNode, findNode, findMemberBetween, addMember, memberLength,
     removeMember, removeNode, removeLoad, pruneOrphans, loadPoint, designStats,

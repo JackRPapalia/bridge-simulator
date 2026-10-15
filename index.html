@@ -26,8 +26,6 @@
       <button type="button" class="tool" data-tool="erase" title="Erase (E)"><span class="k">E</span>Erase</button>
     </div>
 
-    <div class="group" role="radiogroup" aria-label="Material" id="materials"></div>
-
     <div class="group actions">
       <button type="button" class="ghost" id="undo" title="Undo (Ctrl+Z)">Undo</button>
       <button type="button" class="ghost" id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
@@ -59,16 +57,29 @@
       <!-- Build mode -->
       <section class="pane" id="paneBuild">
         <div class="block">
+          <h2>Piece</h2>
+          <p class="note">Every member is cut from this one piece.</p>
+          <label class="field" for="pieceMat"><span>Material</span><select id="pieceMat"></select></label>
+          <div class="trio">
+            <label class="field" for="pieceW"><span>Width</span><span class="num-input"><input id="pieceW" type="number" min="0.05" max="10" step="0.05"><em>cm</em></span></label>
+            <label class="field" for="pieceT"><span>Thickness</span><span class="num-input"><input id="pieceT" type="number" min="0.05" max="10" step="0.05"><em>cm</em></span></label>
+            <label class="field" for="pieceL"><span>Max length</span><span class="num-input"><input id="pieceL" type="number" min="1" max="200" step="0.5"><em>cm</em></span></label>
+          </div>
+          <dl class="kv" id="pieceInfo"></dl>
+        </div>
+
+        <div class="block">
           <h2>Weight</h2>
           <label class="field" for="mass">
             <span id="massLabel">Mass for new weights</span>
-            <span class="num-input"><input id="mass" type="number" min="10" max="500000" step="100" value="10000"><em>kg</em></span>
+            <span class="num-input"><input id="mass" type="number" min="0.01" max="500" step="0.1" value="2"><em>kg</em></span>
           </label>
           <div class="chips" id="massPresets">
-            <button type="button" data-mass="1500">Car 1.5 t</button>
-            <button type="button" data-mass="3500">Van 3.5 t</button>
-            <button type="button" data-mass="12000">Bus 12 t</button>
-            <button type="button" data-mass="40000">Truck 40 t</button>
+            <button type="button" data-mass="0.1">100 g</button>
+            <button type="button" data-mass="0.5">500 g</button>
+            <button type="button" data-mass="1">1 kg</button>
+            <button type="button" data-mass="5">5 kg</button>
+            <button type="button" data-mass="10">10 kg</button>
           </div>
           <p class="note">Pick the Weight tool, then click a joint or a beam to place it.</p>
         </div>
@@ -81,10 +92,10 @@
         <div class="block">
           <h2>Site</h2>
           <label class="field" for="gap">
-            <span>Gap to cross <output id="gapOut">18 m</output></span>
-            <input id="gap" type="range" min="8" max="40" step="1" value="18">
+            <span>Gap between tables <output id="gapOut">50 cm</output></span>
+            <input id="gap" type="range" min="20" max="120" step="1" value="50">
           </label>
-          <label class="check" for="pier"><input id="pier" type="checkbox"> Rock pier mid-river</label>
+          <label class="check" for="pier"><input id="pier" type="checkbox"> Support block in the middle</label>
           <div class="row">
             <select id="preset" aria-label="Starter design"></select>
             <button type="button" class="ghost" id="loadPreset">Load</button>
@@ -96,7 +107,7 @@
           <h2>Design</h2>
           <dl class="stats" id="stats"></dl>
           <label class="check" for="live"><input id="live" type="checkbox"> Live stress preview</label>
-          <label class="check" for="snap"><input id="snap" type="checkbox" checked> Snap to 0.5 m grid</label>
+          <label class="check" for="snap"><input id="snap" type="checkbox" checked> Snap to 1 cm grid</label>
           <div class="row">
             <button type="button" class="ghost" id="codeBtn">Design code</button>
           </div>

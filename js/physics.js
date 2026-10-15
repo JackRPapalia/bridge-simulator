@@ -10,7 +10,8 @@
   const SELF_RAMP = 0.4;      // s to bring self weight on
   const LOAD_START = 0.5;     // s when the weights start pressing down
   const LOAD_RAMP = 2.0;      // s to reach full weight
-  const MIN_NODE_MASS = 10;   // kg (joint hardware), keeps the solver well conditioned
+  const JOINT_MASS = 0.001;   // kg of glue per joint (feels gravity)
+  const MIN_INERTIA = 0.02;   // kg; inertia floor that keeps the solver well conditioned (no extra weight)
   const FORCE_SMOOTH = 0.02;  // s time constant for the force read-out
   const AIR_DAMP = 1.2;       // 1/s global velocity damping
   const AXIAL_DAMP = 0.1;     // fraction of axial relative velocity removed per substep
@@ -48,8 +49,8 @@
         this.x[i] = n.x; this.y[i] = n.y;
       });
 
+      const mat = BS.memberMat(this.model);
       this.members = this.model.members.map((m) => {
-        const mat = BS.MATERIALS[m.mat];
         const a = this.nodeIndex.get(m.a);
         const b = this.nodeIndex.get(m.b);
         const L0 = Math.hypot(this.x[b] - this.x[a], this.y[b] - this.y[a]);
@@ -79,8 +80,8 @@
       for (const l of nodeLoads) this.weights.push({ load: l, p: this.nodeIndex.get(l.node) });
 
       simNodes.forEach((n, i) => {
-        this.selfMass[i] = Math.max(this.selfMass[i], MIN_NODE_MASS);
-        this.inv[i] = n.fixed ? 0 : 1 / (this.selfMass[i] + this.loadMass[i]);
+        this.selfMass[i] += JOINT_MASS;
+        this.inv[i] = n.fixed ? 0 : 1 / (Math.max(this.selfMass[i], MIN_INERTIA) + this.loadMass[i]);
       });
       for (const a of this.attachments) this.inv[a.p] = 1 / this.loadMass[a.p];
 
@@ -94,6 +95,7 @@
       this.done = false;
       this.outcome = null;
       this.peakDeflection = 0;
+      this.fallDrop = Math.max(0.05, 0.2 * this.model.gap);
       this.maxPeakU = 0;
     }
 
@@ -113,16 +115,12 @@
       const selfR = this.selfRamp;
       const loadR = this.loadRamp;
       const damp = Math.exp(-AIR_DAMP * h);
-      const waterY = this.terrain.waterY;
-
       for (let i = 0; i < N; i++) {
         px[i] = x[i]; py[i] = y[i];
         if (inv[i] === 0) continue;
         const fy = -G * (selfMass[i] * selfR + loadMass[i] * loadR);
         vy[i] += h * fy * inv[i];
-        let d = damp;
-        if (y[i] < waterY) d *= 0.995;
-        vx[i] *= d; vy[i] *= d;
+        vx[i] *= damp; vy[i] *= damp;
         x[i] += h * vx[i];
         y[i] += h * vy[i];
       }
@@ -233,7 +231,7 @@
       let fallen = false;
       for (const w of this.weights) {
         const drop = this.y0[w.p] - this.y[w.p];
-        if (drop > 2.5) fallen = true;
+        if (drop > this.fallDrop) fallen = true;
         else this.peakDeflection = Math.max(this.peakDeflection, drop);
       }
       if (fallen && this.collapseTime == null) this.collapseTime = this.time;
@@ -242,11 +240,11 @@
 
       let maxV = 0;
       for (let i = 0; i < this.count; i++) {
-        if (this.inv[i] === 0 || this.y[i] < this.terrain.waterY) continue;
+        if (this.inv[i] === 0 || this.y[i] <= this.terrain.floorY + 0.002) continue;
         maxV = Math.max(maxV, Math.hypot(this.vx[i], this.vy[i]));
       }
       const loaded = this.time > LOAD_START + LOAD_RAMP + 0.3;
-      this.calmTime = loaded && maxV < 0.03 ? this.calmTime + dt : 0;
+      this.calmTime = loaded && maxV < 0.005 ? this.calmTime + dt : 0;
 
       if (!this.done) {
         if ((this.collapseTime != null && this.time > this.collapseTime + 2.5) || this.calmTime > 0.6 || this.time > 14) {
@@ -269,27 +267,27 @@
       [[c.a, mx, my], [c.b, mx, my]].forEach(([i, ex, ey], k) => {
         this.debris.push({
           x: (x[i] + ex) / 2, y: (y[i] + ey) / 2,
-          vx: vx[i] * 0.5 + (k ? 0.6 : -0.6), vy: vy[i] * 0.5 + 0.5,
+          vx: vx[i] * 0.5 + (k ? 0.15 : -0.15), vy: vy[i] * 0.5 + 0.2,
           ang: Math.atan2(y[c.b] - y[c.a], x[c.b] - x[c.a]),
-          spin: (k ? 1 : -1) * (1 + Math.random() * 2),
-          len: c.L0 / 2, mat: c.mat, id: c.id, life: 4,
+          spin: (k ? 1 : -1) * (2 + Math.random() * 4),
+          len: c.L0 / 2, mat: c.mat, id: c.id, life: 6,
         });
       });
     }
 
     updateDebris(dt) {
-      const waterY = this.terrain.waterY;
+      const floorY = this.terrain.floorY;
       for (const d of this.debris) {
+        if (d.landed) { d.life -= dt; continue; }
         d.vy -= BS.G * dt;
-        if (d.y < waterY) {
-          if (!d.splashed) { d.splashed = true; this.splashes.push({ x: d.x, t: 0 }); }
-          d.vx *= 0.9; d.vy *= 0.9; d.spin *= 0.9; d.life -= dt;
-        }
         d.x += d.vx * dt; d.y += d.vy * dt; d.ang += d.spin * dt;
+        if (d.y - Math.abs(Math.sin(d.ang)) * d.len / 2 <= floorY) {
+          d.landed = true;
+          d.ang = 0;
+          d.y = floorY + d.mat.width / 2;
+        }
       }
       this.debris = this.debris.filter((d) => d.life > 0);
-      for (const s of this.splashes) s.t += dt;
-      this.splashes = this.splashes.filter((s) => s.t < 1.2);
     }
 
     finish() {

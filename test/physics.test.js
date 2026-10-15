@@ -21,40 +21,40 @@ function runSim(model, seconds) {
 }
 
 test('two-bar truss matches hand calculation', () => {
-  // Symmetric V hanging from two anchors 4 m apart, apex 1.5 m below: N = P / (2 sin a)
-  const m = BS.createModel(10);
+  // Symmetric V hanging from two anchors 40 cm apart, apex 15 cm below: N = P / (2 sin a)
+  const m = BS.createModel(0.5);
   const a = BS.addNode(m, 0, 0, true);
-  const b = BS.addNode(m, 4, 0, true);
-  const c = BS.addNode(m, 2, -1.5, false);
-  BS.addMember(m, a.id, c.id, 'steel');
-  BS.addMember(m, b.id, c.id, 'steel');
-  m.loads.push({ id: m.nextId++, mass: 1000, node: c.id });
+  const b = BS.addNode(m, 0.4, 0, true);
+  const c = BS.addNode(m, 0.2, -0.15, false);
+  BS.addMember(m, a.id, c.id);
+  BS.addMember(m, b.id, c.id);
+  m.loads.push({ id: m.nextId++, mass: 1, node: c.id });
   const res = BS.analyze(m);
   assert(res.ok, 'should be stable');
-  const sinA = 1.5 / 2.5;
-  const expected = (1000 * BS.G) / (2 * sinA);
+  const sinA = 0.15 / 0.25;
+  const expected = (1 * BS.G) / (2 * sinA);
   const N = res.members[0].NL;
   assert(Math.abs(N - expected) / expected < 1e-6, `live force ${N} vs ${expected}`);
 });
 
 test('collinear deck is detected as a mechanism', () => {
-  const m = BS.makePreset('plank', 18, false, 5000);
+  const m = BS.makePreset('plank', 0.5, false, 1);
   const res = BS.analyze(m);
   assert(!res.ok && res.reason === 'mechanism', JSON.stringify(res.reason));
 });
 
 for (const key of ['pratt', 'warren', 'arch', 'stayed']) {
   test(`${key}: static solve is stable`, () => {
-    const m = BS.makePreset(key, 18, false, 10000);
+    const m = BS.makePreset(key, 0.5, false, 2);
     const res = BS.analyze(m);
     assert(res.ok, `reason ${res.reason} node ${res.nodeId}`);
     const k = BS.loadFactor(res);
-    console.log(`        safe load ≈ ${(k * 10).toFixed(1)} t, deflection ${(res.maxDeflection * 1000).toFixed(1)} mm`);
+    console.log(`        safe load ≈ ${BS.kgLabel(k * 2)}, deflection ${BS.cm(res.maxDeflection, 3)}`);
   });
 }
 
 test('dynamic forces agree with static forces on a Pratt truss (light load)', () => {
-  const m = BS.makePreset('pratt', 18, false, 2000);
+  const m = BS.makePreset('pratt', 0.5, false, 4);
   const res = BS.analyze(m);
   const sim = runSim(m, 6);
   assert(sim.events.length === 0, 'nothing should break');
@@ -66,32 +66,36 @@ test('dynamic forces agree with static forces on a Pratt truss (light load)', ()
     maxErr = Math.max(maxErr, Math.abs(c.Fs - N));
     maxF = Math.max(maxF, Math.abs(N));
   }
-  console.log(`        max |dyn - static| = ${(maxErr / 1000).toFixed(2)} kN of max ${(maxF / 1000).toFixed(1)} kN; outcome ${sim.outcome} at ${sim.time.toFixed(2)} s`);
+  console.log(`        max |dyn - static| = ${maxErr.toFixed(3)} N of max ${maxF.toFixed(1)} N; outcome ${sim.outcome} at ${sim.time.toFixed(2)} s`);
   assert(maxErr / maxF < 0.05, 'forces should agree within 5%');
 });
 
-test('plain deck collapses or sags heavily under a truck', () => {
-  const m = BS.makePreset('plank', 18, false, 40000);
+test('plain deck collapses or sags heavily under 10 kg', () => {
+  const m = BS.makePreset('plank', 0.5, false, 10);
   const sim = runSim(m, 14);
-  console.log(`        outcome ${sim.outcome}, broken ${sim.events.length}, deflection ${sim.finalDeflection?.toFixed(2)} m`);
+  console.log(`        outcome ${sim.outcome}, broken ${sim.events.length}, deflection ${BS.cm(sim.finalDeflection || 0)}`);
   assert(sim.done);
 });
 
 test('overloaded truss breaks members, report ranks them', () => {
-  const m = BS.makePreset('warren', 18, false, 60000);
+  const m = BS.makePreset('warren', 0.5, false, 40);
   const sim = runSim(m, 14);
   const rep = BS.buildReport(m, sim);
   console.log(`        outcome ${sim.outcome}, broke ${sim.events.map((e) => 'M' + e.id + ':' + e.mode).join(', ')}`);
   console.log(`        weakest static: ${rep.weak.slice(0, 3).map((w) => `M${w.id} ${(w.u * 100).toFixed(0)}% ${w.mode}`).join(', ')}`);
-  assert(sim.events.length > 0, 'something should break at 60 t');
+  const est = BS.loadFactor(rep.static) * 40;
+  const first = sim.events[0].load * 40;
+  console.log(`        static capacity ${BS.kgLabel(est)}, live test first break at ${BS.kgLabel(first)}`);
+  assert(Math.abs(first - est) / est < 0.1, 'live failure load should match static estimate within 10%');
   assert(rep.weak[0].u > 1);
 });
 
 test('mid-beam weight produces bending', () => {
-  const m = BS.makePreset('pratt', 18, false, 0);
+  const m = BS.makePreset('pratt', 0.5, false, 0);
   m.loads = [];
-  const deckMember = m.members.find((mm) => mm.mat === 'ibeam');
-  m.loads.push({ id: m.nextId++, mass: 20000, member: deckMember.id, t: 0.5 });
+  const nm = BS.nodeMap(m);
+  const deckMember = m.members.find((mm) => nm.get(mm.a).y === 0 && nm.get(mm.b).y === 0);
+  m.loads.push({ id: m.nextId++, mass: 6, member: deckMember.id, t: 0.5 });
   const rep = BS.buildReport(m);
   const c = rep.checks.get(deckMember.id);
   assert(c.bend > 0.3, `bending ratio ${c.bend}`);
@@ -100,13 +104,22 @@ test('mid-beam weight produces bending', () => {
 });
 
 test('performance: 160 substeps for a large truss', () => {
-  const m = BS.makePreset('pratt', 40, false, 10000);
+  const m = BS.makePreset('pratt', 1.2, false, 5);
   const sim = new BS.Simulation(m);
   const t0 = Date.now();
   for (let i = 0; i < 60; i++) sim.step(1 / 60);
   const ms = (Date.now() - t0) / 60;
   console.log(`        ${ms.toFixed(2)} ms per frame with ${sim.members.length} members`);
   assert(ms < 12);
+});
+
+test('single piece: thicker piece carries more, all members share it', () => {
+  const m = BS.makePreset('pratt', 0.5, false, 2);
+  const k1 = BS.loadFactor(BS.analyze(m));
+  m.piece = { ...m.piece, thick: m.piece.thick * 2 };
+  const k2 = BS.loadFactor(BS.analyze(m));
+  console.log(`        0.3 cm thick: ${BS.kgLabel(k1 * 2)}, 0.6 cm thick: ${BS.kgLabel(k2 * 2)}`);
+  assert(k2 > k1 * 1.5);
 });
 
 process.exitCode = failures ? 1 : 0;

@@ -3,14 +3,13 @@
   'use strict';
   const BS = window.BS;
   const $ = (id) => document.getElementById(id);
-  const STORE_KEY = 'bridge-load-lab:v1';
+  const STORE_KEY = 'bridge-load-lab:v2';
 
   const S = {
     model: null,
     mode: 'build',          // build | sim | results
     tool: 'build',
-    material: 'steel',
-    mass: 10000,
+    mass: 2,
     snap: true,
     live: false,
     liveChecks: null,
@@ -51,7 +50,8 @@
   }
   function validModel(m) {
     return m && Array.isArray(m.nodes) && Array.isArray(m.members) && Array.isArray(m.loads) &&
-      typeof m.gap === 'number' && m.members.every((mm) => BS.MATERIALS[mm.mat]);
+      typeof m.gap === 'number' && m.piece && BS.MATERIALS[m.piece.material] &&
+      [m.piece.width, m.piece.thick, m.piece.maxLen].every((v) => typeof v === 'number' && v > 0);
   }
   function snapshot() { return JSON.stringify(S.model); }
   function pushUndo(snap) {
@@ -88,6 +88,7 @@
     renderSelection();
     updateHistoryButtons();
     syncSiteControls();
+    syncPieceControls();
   }
 
   function selectionExists(sel) {
@@ -116,10 +117,10 @@
   }
 
   const HINTS = {
-    build: 'Drag from point to point to add a member. Joints on the cliffs become anchors. Right-drag or two fingers to pan, scroll or pinch to zoom.',
-    select: 'Drag joints or weights to move them. Click a member to change its material. Drag empty space to pan.',
+    build: 'Drag from point to point to add a piece. Joints on the tables become anchors. Right-drag or two fingers to pan, scroll or pinch to zoom.',
+    select: 'Drag joints or weights to move them. Click a member to see its length and limits. Drag empty space to pan.',
     weight: 'Click a joint or a beam to place the weight. Click a placed weight to select it.',
-    anchor: 'Click a joint on solid ground to pin it or release it. Click bare ground to add an anchor.',
+    anchor: 'Click a joint on a table, the floor or the support block to pin it or release it. Click a surface to add an anchor.',
     erase: 'Click or drag across members, joints and weights to delete them.',
     sim: 'Load test running. Colours show how close each member is to its limit.',
     results: 'Hover a member to see its force and limit. Numbered badges mark the weakest members.',
@@ -136,37 +137,6 @@
     app.dataset.tool = tool;
     document.querySelectorAll('.tool').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tool === tool)));
     updateHint();
-  }
-
-  function buildMaterialButtons() {
-    const wrap = $('materials');
-    for (const key of BS.MATERIAL_ORDER) {
-      const mat = BS.MATERIALS[key];
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'mat';
-      b.dataset.mat = key;
-      b.setAttribute('role', 'radio');
-      b.title = `${mat.name}: ${mat.note}`;
-      b.innerHTML = `<span class="sw" style="--sw: var(--m-${key})"></span><span class="lbl">${mat.name}</span>`;
-      b.addEventListener('click', () => setMaterial(key));
-      wrap.appendChild(b);
-    }
-  }
-  function setMaterial(key) {
-    S.material = key;
-    document.querySelectorAll('.mat').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.mat === key)));
-    if (S.selection?.type === 'member' && S.mode === 'build') {
-      const m = S.model.members.find((mm) => mm.id === S.selection.id);
-      if (m && m.mat !== key) {
-        if (key === 'cable' && S.model.loads.some((l) => l.member === m.id)) {
-          toast('Cables cannot carry a weight between joints. Move the weight first.');
-          return;
-        }
-        pushUndo(); m.mat = key; changed();
-      }
-    }
-    if (S.mode === 'build' && S.tool !== 'build' && S.selection?.type !== 'member') setTool('build');
   }
 
   /* ---------------- Geometry helpers ---------------- */
@@ -214,8 +184,8 @@
 
   function snapWorld(px, py) {
     let x = R.wx(px); let y = R.wy(py);
-    if (S.snap) { x = Math.round(x * 2) / 2; y = Math.round(y * 2) / 2; }
-    return { x: +x.toFixed(3), y: +y.toFixed(3) };
+    if (S.snap) { x = Math.round(x * 100) / 100; y = Math.round(y * 100) / 100; }
+    return { x: +x.toFixed(4), y: +y.toFixed(4) };
   }
 
   /* A point for building: an existing joint if close, otherwise a grid point. */
@@ -231,11 +201,11 @@
   }
 
   function validateMember(p0, p1) {
-    const mat = BS.MATERIALS[S.material];
+    const mat = BS.memberMat(S.model);
     const L = Math.hypot(p1.x - p0.x, p1.y - p0.y);
     const base = { x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y };
-    if (L < 0.3) return { ...base, valid: false, reason: '' };
-    if (L > mat.maxLen) return { ...base, valid: false, reason: `${L.toFixed(1)} m · max ${mat.maxLen} m for ${mat.name.toLowerCase()}` };
+    if (L < 0.005) return { ...base, valid: false, reason: '' };
+    if (L > mat.maxLen + 1e-9) return { ...base, valid: false, reason: `${BS.cm(L)} · longer than your ${BS.cm(mat.maxLen)} piece` };
     if (p0.node && p1.node && BS.findMemberBetween(S.model, p0.node.id, p1.node.id)) return { ...base, valid: false, reason: 'Already connected' };
     return { ...base, valid: true };
   }
@@ -336,7 +306,7 @@
 
   function zoomAt(px, py, f) {
     const wx = R.wx(px); const wy = R.wy(py);
-    R.cam.scale = Math.max(5, Math.min(160, R.cam.scale * f));
+    R.cam.scale = Math.max(100, Math.min(20000, R.cam.scale * f));
     R.cam.x = wx - (px - R.w / 2) / R.cam.scale;
     R.cam.y = wy + (py - R.h / 2) / R.cam.scale;
   }
@@ -357,27 +327,29 @@
     }
   }
 
-  function fmtkN(N) { return `${(N / 1000).toFixed(Math.abs(N) < 10000 ? 1 : 0)} kN`; }
+  const fmtN = BS.newtons;
+  const fmtNcm = (M) => `${(M * 100).toFixed(1)} N·cm`;
 
   function memberLines(id) {
     const m = S.model.members.find((mm) => mm.id === id);
     if (!m) return [];
-    const mat = BS.MATERIALS[m.mat];
+    const mat = BS.memberMat(S.model);
     const L = BS.memberLength(S.model, m);
-    const lines = [`M${m.id} · ${mat.name} · ${L.toFixed(2)} m`];
+    const lines = [`M${m.id} · ${BS.cm(L)}`];
     const chk = S.mode === 'results' ? S.report?.checks.get(id) : S.liveChecks?.get(id);
     if (chk && chk.N != null) {
       const kind = chk.mode === 'slack' ? 'slack' : chk.N >= 0 ? 'tension' : 'compression';
-      lines.push(`Force   ${fmtkN(chk.N)} ${kind}`);
-      if (chk.M > 1) lines.push(`Moment  ${(chk.M / 1000).toFixed(1)} kN·m`);
-      if (chk.mode === 'bending') lines.push(`Limit   ${(BS.bendingCapacity(mat) / 1000).toFixed(1)} kN·m bending`);
-      else if (chk.mode !== 'slack') lines.push(`Limit   ${chk.N >= 0 ? fmtkN(BS.tensionCapacity(mat)) : fmtkN(BS.compressionCapacity(mat, L))} ${chk.N >= 0 ? 'tension' : BS.eulerLoad(mat, L) < mat.fy * mat.A ? 'buckling' : 'crushing'}`);
+      lines.push(`Force   ${fmtN(chk.N)} ${kind}`);
+      if (chk.M > 1e-4) lines.push(`Moment  ${fmtNcm(chk.M)}`);
+      if (chk.mode === 'bending') lines.push(`Limit   ${fmtNcm(BS.bendingCapacity(mat))} bending`);
+      else if (chk.mode !== 'slack') lines.push(`Limit   ${chk.N >= 0 ? fmtN(BS.tensionCapacity(mat)) : fmtN(BS.compressionCapacity(mat, L))} ${chk.N >= 0 ? 'tension' : BS.buckles(mat, L) ? 'buckling' : 'crushing'}`);
       lines.push(`Used    ${Math.round(chk.u * 100)}%  (${BS.MODE_LABEL[chk.mode].toLowerCase()})`);
     } else if (chk) {
       lines.push(`Peak    ${Math.round(chk.u * 100)}% in live test`);
     } else {
-      lines.push(`Tension limit  ${fmtkN(BS.tensionCapacity(mat))}`);
-      if (!mat.tensionOnly) lines.push(`Push limit     ${fmtkN(BS.compressionCapacity(mat, L))}`);
+      lines.push(`Tension limit  ${fmtN(BS.tensionCapacity(mat))}`);
+      lines.push(`Push limit     ${fmtN(BS.compressionCapacity(mat, L))}`);
+      if (L > mat.maxLen + 1e-9) lines.push(`Longer than your ${BS.cm(mat.maxLen)} piece`);
     }
     const ev = S.mode === 'results' && S.sim?.events.findIndex((e) => e.id === id);
     if (ev != null && ev >= 0) lines.push(`Broke #${ev + 1} at ${S.sim.events[ev].time.toFixed(2)} s`);
@@ -404,8 +376,6 @@
         S.drag = { kind: 'moveLoad', load: S.model.loads.find((l) => l.id === hit.id), snap: snapshot(), moved: false };
       } else if (hit?.type === 'member') {
         select(hit);
-        const m = S.model.members.find((mm) => mm.id === hit.id);
-        setMaterialButtons(m.mat);
       } else {
         select(null);
         S.drag = { kind: 'pan', last: p };
@@ -433,7 +403,7 @@
       const terrain = BS.terrainOf(S.model);
       if (hit?.type === 'node') {
         const n = S.model.nodes.find((nn) => nn.id === hit.id);
-        if (!n.fixed && !BS.onTerrain(terrain, n.x, n.y)) { toast('Anchors must sit on the cliffs or the pier.'); return; }
+        if (!n.fixed && !BS.onTerrain(terrain, n.x, n.y)) { toast('Anchors must sit on a table, the floor or the support block.'); return; }
         pushUndo();
         n.fixed = !n.fixed;
         if (!n.fixed) BS.pruneOrphans(S.model);
@@ -441,7 +411,7 @@
         return;
       }
       const w = snapWorld(p.x, p.y);
-      if (!BS.onTerrain(terrain, w.x, w.y)) { toast('Anchors must sit on the cliffs or the pier.'); return; }
+      if (!BS.onTerrain(terrain, w.x, w.y)) { toast('Anchors must sit on a table, the floor or the support block.'); return; }
       pushUndo();
       BS.addNode(S.model, w.x, w.y, true);
       changed();
@@ -464,7 +434,6 @@
     const m = S.model.members.find((mm) => mm.id === hit.id);
     if (hit.t < 0.08) return { node: m.a, member: undefined, t: undefined };
     if (hit.t > 0.92) return { node: m.b, member: undefined, t: undefined };
-    if (BS.MATERIALS[m.mat].tensionOnly) { if (!quiet) toast('A cable cannot hold a weight between joints. Put it on a joint.'); return null; }
     return { member: m.id, t: Math.round(hit.t * 20) / 20, node: undefined };
   }
 
@@ -502,7 +471,8 @@
       const ox = n.x; const oy = n.y;
       n.x = w.x; n.y = w.y;
       const nm = BS.nodeMap(S.model);
-      const tooLong = S.model.members.some((m) => (m.a === n.id || m.b === n.id) && BS.memberLength(S.model, m, nm) > BS.MATERIALS[m.mat].maxLen);
+      const maxLen = BS.memberMat(S.model).maxLen + 1e-9;
+      const tooLong = S.model.members.some((m) => (m.a === n.id || m.b === n.id) && BS.memberLength(S.model, m, nm) > maxLen);
       if (tooLong) { n.x = ox; n.y = oy; return; }
       if (n.fixed && !BS.onTerrain(BS.terrainOf(S.model), n.x, n.y)) n.fixed = false;
       if (!d.moved) { pushUndo(d.snap); d.moved = true; }
@@ -532,7 +502,7 @@
         pushUndo();
         const a = nodeFor(d.start);
         const b = nodeFor(d.end);
-        BS.addMember(S.model, a.id, b.id, S.material);
+        BS.addMember(S.model, a.id, b.id);
         changed();
       } else if (pv?.reason) {
         toast(pv.reason);
@@ -545,11 +515,6 @@
   function select(sel) {
     S.selection = sel ? { type: sel.type, id: sel.id } : null;
     renderSelection();
-  }
-
-  function setMaterialButtons(key) {
-    document.querySelectorAll('.mat').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.mat === key)));
-    S.material = key;
   }
 
   /* ---------------- Keyboard ---------------- */
@@ -571,8 +536,6 @@
     if ((k === 'delete' || k === 'backspace') && S.selection && S.mode === 'build') { deleteSelection(); return; }
     const tools = { b: 'build', v: 'select', w: 'weight', a: 'anchor', e: 'erase' };
     if (tools[k]) setTool(tools[k]);
-    const mats = { 1: 'timber', 2: 'steel', 3: 'ibeam', 4: 'cable' };
-    if (mats[k]) setMaterial(mats[k]);
   });
   window.addEventListener('keyup', (e) => { if (e.key === ' ') spaceDown = false; });
 
@@ -589,17 +552,19 @@
 
   /* ---------------- Panels ---------------- */
   function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-  const tonnes = (kg) => (kg >= 1000 ? `${+(kg / 1000).toFixed(kg >= 100000 ? 0 : 1)} t` : `${Math.round(kg)} kg`);
+  const massLabel = BS.kgLabel;
 
   function renderStats() {
     const st = BS.designStats(S.model);
-    $('stats').innerHTML = [
+    const rows = [
       ['Members', st.members],
       ['Joints', st.joints],
-      ['Structure mass', tonnes(st.mass)],
-      ['Build cost', `$${Math.round(st.cost).toLocaleString('en-US')}`],
-      ['Weight on bridge', st.load ? tonnes(st.load) : 'none yet'],
-    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+      ['Total length cut', BS.cm(st.length, 0)],
+      ['Bridge mass', `${(st.mass * 1000).toFixed(1)} g`],
+      ['Weight on bridge', st.load ? massLabel(st.load) : 'none yet'],
+    ];
+    if (st.overLong) rows.push(['Longer than one piece', `${st.overLong}`]);
+    $('stats').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   }
 
   function renderSelection() {
@@ -612,24 +577,20 @@
     const nm = BS.nodeMap(S.model);
     if (sel.type === 'member') {
       const m = S.model.members.find((mm) => mm.id === sel.id);
-      const mat = BS.MATERIALS[m.mat];
+      const mat = BS.memberMat(S.model);
       const L = BS.memberLength(S.model, m, nm);
-      const euler = BS.eulerLoad(mat, L);
       $('selTitle').textContent = `Member M${m.id}`;
-      const opts = BS.MATERIAL_ORDER.map((k) => `<option value="${k}"${k === m.mat ? ' selected' : ''}>${BS.MATERIALS[k].name}</option>`).join('');
       const chk = S.liveChecks?.get(m.id);
       body.innerHTML = `
-        <label class="field" for="selMat"><span>Material</span><select id="selMat">${opts}</select></label>
         <dl class="kv">
-          <dt>Length</dt><dd>${L.toFixed(2)} m</dd>
-          <dt>Self weight</dt><dd>${Math.round(BS.linearMass(mat) * L)} kg</dd>
-          <dt>Tension limit</dt><dd>${fmtkN(BS.tensionCapacity(mat))}</dd>
-          <dt>Compression limit</dt><dd>${mat.tensionOnly ? 'none' : `${fmtkN(BS.compressionCapacity(mat, L))} ${euler < mat.fy * mat.A ? '(buckling)' : '(crushing)'}`}</dd>
-          <dt>Bending limit</dt><dd>${mat.S ? `${(BS.bendingCapacity(mat) / 1000).toFixed(1)} kN·m` : 'none'}</dd>
+          <dt>Length</dt><dd>${BS.cm(L)}${L > mat.maxLen + 1e-9 ? ' (too long)' : ''}</dd>
+          <dt>Mass</dt><dd>${(BS.linearMass(mat) * L * 1000).toFixed(2)} g</dd>
+          <dt>Tension limit</dt><dd>${fmtN(BS.tensionCapacity(mat))}</dd>
+          <dt>Compression limit</dt><dd>${fmtN(BS.compressionCapacity(mat, L))} ${BS.buckles(mat, L) ? '(buckling)' : '(crushing)'}</dd>
+          <dt>Bending limit</dt><dd>${fmtNcm(BS.bendingCapacity(mat))}</dd>
           ${chk ? `<dt>Utilisation now</dt><dd>${Math.round(chk.u * 100)}%</dd>` : ''}
         </dl>
         <div class="sel-actions"><button type="button" class="ghost danger" id="selDel">Delete member</button></div>`;
-      $('selMat').addEventListener('change', (e) => setMaterial(e.target.value));
     } else if (sel.type === 'node') {
       const n = nm.get(sel.id);
       const ground = BS.onTerrain(BS.terrainOf(S.model), n.x, n.y);
@@ -637,7 +598,7 @@
       $('selTitle').textContent = `Joint J${n.id}`;
       body.innerHTML = `
         <dl class="kv">
-          <dt>Position</dt><dd>${n.x.toFixed(2)}, ${n.y.toFixed(2)} m</dd>
+          <dt>Position</dt><dd>${(n.x * 100).toFixed(1)}, ${(n.y * 100).toFixed(1)} cm</dd>
           <dt>Members</dt><dd>${deg}</dd>
           <dt>Support</dt><dd>${n.fixed ? 'Pinned anchor' : 'Free joint'}</dd>
         </dl>
@@ -652,8 +613,8 @@
       const where = l.node != null ? `Joint J${l.node}` : `M${l.member}, ${Math.round(l.t * 100)}% along`;
       body.innerHTML = `
         <dl class="kv">
-          <dt>Mass</dt><dd>${tonnes(l.mass)}</dd>
-          <dt>Force</dt><dd>${fmtkN(l.mass * BS.G)}</dd>
+          <dt>Mass</dt><dd>${massLabel(l.mass)}</dd>
+          <dt>Force</dt><dd>${fmtN(l.mass * BS.G)}</dd>
           <dt>Resting on</dt><dd>${where}</dd>
         </dl>
         <p class="note">Change the mass in the Weight box above. Drag the weight to move it.</p>
@@ -672,7 +633,7 @@
     if (document.activeElement !== input) input.value = l ? l.mass : S.mass;
   }
   function setMass(v) {
-    const mass = Math.max(10, Math.min(500000, Math.round(+v || 0)));
+    const mass = Math.max(0.01, Math.min(500, Math.round((+v || 0) * 1000) / 1000));
     const l = selectedLoad();
     if (l) {
       l.mass = mass;
@@ -696,13 +657,49 @@
     setMass(b.dataset.mass);
     if (before !== snapshot()) pushUndo(before);
     syncMassField();
-    if (!selectedLoad()) { setTool('weight'); toast(`Click a joint or beam to place ${tonnes(S.mass)}.`); }
+    if (!selectedLoad()) { setTool('weight'); toast(`Click a joint or beam to place ${massLabel(S.mass)}.`); }
+  });
+
+  /* Piece controls: one material and cross-section for every member (inputs in cm). */
+  function fillPieceMaterials() {
+    $('pieceMat').innerHTML = BS.MATERIAL_ORDER.map((k) => `<option value="${k}">${BS.MATERIALS[k].name}</option>`).join('');
+  }
+  function syncPieceControls() {
+    const p = S.model.piece;
+    const set = (id, v) => { if (document.activeElement !== $(id)) $(id).value = +(v * 100).toFixed(3); };
+    $('pieceMat').value = p.material;
+    set('pieceW', p.width); set('pieceT', p.thick); set('pieceL', p.maxLen);
+    const mat = BS.memberMat(S.model);
+    const ref = Math.min(0.1, mat.maxLen);
+    $('pieceInfo').innerHTML = [
+      ['Tension limit', fmtN(BS.tensionCapacity(mat))],
+      [`Push limit at ${BS.cm(ref, 0)}`, fmtN(BS.compressionCapacity(mat, ref))],
+      ['Mass per cm', `${(BS.linearMass(mat) * 10).toFixed(3)} g`],
+    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  }
+  function setPiece(field, value) {
+    const p = { ...S.model.piece };
+    if (field === 'material') p.material = value;
+    else {
+      const v = +value;
+      if (!(v > 0)) { syncPieceControls(); return; }
+      const lim = { width: [0.0005, 0.1], thick: [0.0005, 0.1], maxLen: [0.01, 2] }[field];
+      p[field] = Math.max(lim[0], Math.min(lim[1], v / 100));
+    }
+    if (JSON.stringify(p) === JSON.stringify(S.model.piece)) return;
+    pushUndo();
+    S.model.piece = p;
+    changed();
+  }
+  $('pieceMat').addEventListener('change', (e) => setPiece('material', e.target.value));
+  [['pieceW', 'width'], ['pieceT', 'thick'], ['pieceL', 'maxLen']].forEach(([id, field]) => {
+    $(id).addEventListener('change', (e) => { setPiece(field, e.target.value); syncPieceControls(); });
   });
 
   /* Site controls */
   function syncSiteControls() {
-    $('gap').value = S.model.gap;
-    $('gapOut').textContent = `${S.model.gap} m`;
+    $('gap').value = Math.round(S.model.gap * 100);
+    $('gapOut').textContent = BS.cm(S.model.gap, 0);
     $('pier').checked = !!S.model.pier;
   }
   function refixAnchors() {
@@ -712,11 +709,11 @@
   $('gap').addEventListener('pointerdown', () => { S.pending = snapshot(); });
   $('gap').addEventListener('focus', () => { S.pending = snapshot(); });
   $('gap').addEventListener('input', (e) => {
-    const g = +e.target.value;
+    const g = +e.target.value / 100;
     const old = S.model.gap;
-    if (g === old) return;
+    if (Math.abs(g - old) < 1e-9) return;
     const f = g / old;
-    S.model.nodes.forEach((n) => { n.x = +(n.x * f).toFixed(3); });
+    S.model.nodes.forEach((n) => { n.x = +(n.x * f).toFixed(4); });
     S.model.gap = g;
     refixAnchors();
     changed();
@@ -738,22 +735,23 @@
   }
   $('loadPreset').addEventListener('click', () => {
     pushUndo();
-    S.model = BS.makePreset($('preset').value, S.model.gap, S.model.pier, S.mass);
+    S.model = BS.makePreset($('preset').value, S.model.gap, S.model.pier, S.mass, S.model.piece);
     S.selection = null;
     changed();
-    toast(`Loaded ${BS.PRESETS[$('preset').value].name.toLowerCase()} with a ${tonnes(S.mass)} weight at midspan.`);
+    toast(`Loaded ${BS.PRESETS[$('preset').value].name.toLowerCase()} with a ${massLabel(S.mass)} weight at midspan.`);
   });
   $('clear').addEventListener('click', () => {
     pushUndo();
     const m = BS.createModel(S.model.gap);
     m.pier = S.model.pier;
+    m.piece = { ...S.model.piece };
     BS.addNode(m, 0, 0, true);
     BS.addNode(m, m.gap, 0, true);
     S.model = m;
     S.selection = null;
     changed();
     setTool('build');
-    toast('Cleared. Two anchors are ready on the cliff edges. Undo brings the old design back.');
+    toast('Cleared. Two anchors are ready on the table edges. Undo brings the old design back.');
   });
 
   $('live').addEventListener('change', (e) => { S.live = e.target.checked; refreshLive(); renderSelection(); });
@@ -805,7 +803,7 @@
 
   function startSim() {
     if (!S.model.members.length) { toast('Build something first. Drag between points with the Build tool.'); return; }
-    if (!S.model.nodes.some((n) => n.fixed)) { toast('Nothing is anchored. Use the Anchor tool on a cliff edge.'); return; }
+    if (!S.model.nodes.some((n) => n.fixed)) { toast('Nothing is anchored. Use the Anchor tool on a table edge.'); return; }
     if (!S.model.loads.length) toast('No weight placed, so this tests self weight only.');
     S.sim = new BS.Simulation(S.model);
     S.report = null;
@@ -859,10 +857,8 @@
   });
 
   function describeEvent(ev) {
-    const m = S.model.members.find((mm) => mm.id === ev.id);
-    const mat = m ? BS.MATERIALS[m.mat].name.toLowerCase() : '';
     const verb = { tension: 'snapped in tension', buckling: 'buckled', compression: 'crushed', bending: 'bent and broke' }[ev.mode] || 'failed';
-    return `<b>M${ev.id}</b> ${mat} ${verb} at ${Math.round(ev.load * 100)}% load`;
+    return `<b>M${ev.id}</b> ${verb} at ${Math.round(ev.load * 100)}% load`;
   }
 
   let shownEvents = 0;
@@ -883,6 +879,11 @@
     }
   }
 
+  function massHtml(kg) {
+    if (kg < 1) return `${Math.round(kg * 1000)}<small>g</small>`;
+    return `${+kg.toFixed(kg < 100 ? 1 : 0)}<small>kg</small>`;
+  }
+
   function renderResults() {
     const rep = S.report;
     const sim = S.sim;
@@ -892,14 +893,14 @@
     const v = $('verdict');
     v.dataset.v = outcome;
     v.textContent = { held: 'Held', damaged: 'Damaged', collapsed: 'Collapsed', unstable: 'Unstable' }[outcome];
-    const load = tonnes(rep.totalLoad);
+    const load = massLabel(rep.totalLoad);
     let text;
     if (outcome === 'held') {
       text = rep.totalLoad
         ? `The bridge carried ${load} without losing a member. The most stressed member reached ${Math.round(rep.peakU * 100)}% of its limit.`
         : 'The bridge stands under its own weight. Place a weight to put it to work.';
     } else if (outcome === 'unstable') {
-      text = `Nothing snapped, but the structure cannot hold its shape. It caught the weight only by sagging ${Math.round((sim?.peakDeflection || 0) * 1000)} mm until its members pulled taut like a chain. Add diagonals to form triangles.`;
+      text = `Nothing snapped, but the structure cannot hold its shape. It caught the weight only by sagging ${BS.cm(sim?.peakDeflection || 0)} until its members pulled taut like a chain. Add diagonals to form triangles.`;
     } else if (outcome === 'damaged') {
       text = `${sim.events.length} member${sim.events.length > 1 ? 's' : ''} gave way, but the rest of the structure still holds the ${load}.`;
     } else {
@@ -915,12 +916,12 @@
     const peakPct = Math.round(rep.peakU * 100);
     metrics.push(['Peak utilisation', `${rep.static.ok ? peakPct : Math.round((sim?.maxPeakU || 0) * 100)}<small>%</small>`]);
     if (rep.safeLoad != null) {
-      metrics.push(['Est. capacity', Number.isFinite(rep.safeLoad) ? `${(rep.safeLoad / 1000).toFixed(1)}<small>t</small>` : '&gt;999<small>t</small>']);
+      metrics.push(['Est. capacity', Number.isFinite(rep.safeLoad) ? massHtml(rep.safeLoad) : '&gt;5000<small>kg</small>']);
     } else {
-      metrics.push(['Est. capacity', rep.static.ok ? '<small>add a weight</small>' : '0<small>t</small>']);
+      metrics.push(['Est. capacity', rep.static.ok ? '<small>add a weight</small>' : '0<small>kg</small>']);
     }
     const defl = rep.static.ok ? rep.maxDeflection : sim?.peakDeflection || 0;
-    metrics.push([rep.static.ok ? 'Static sag' : 'Sag in test', `${Math.round((defl || 0) * 1000)}<small>mm</small>`]);
+    metrics.push([rep.static.ok ? 'Static sag' : 'Sag in test', `${((defl || 0) * 100).toFixed(2)}<small>cm</small>`]);
     metrics.push(['Members failed', `${sim ? sim.events.length : 0}<small>of ${S.model.members.length}</small>`]);
     $('metrics').innerHTML = metrics.map(([k, val]) => `<div><dt>${k}</dt><dd>${val}</dd></div>`).join('');
 
@@ -930,7 +931,7 @@
       const broke = brokenOrder.get(w.id);
       return `<li data-id="${w.id}" style="--c:${col}">
         <span class="rank">${w.rank}</span>
-        <span class="name">M${w.id} <small>${esc(w.mat.name)} · ${w.L.toFixed(1)} m${broke ? ` · broke #${broke}` : ''}</small></span>
+        <span class="name">M${w.id} <small>${BS.cm(w.L)}${broke ? ` · broke #${broke}` : ''}</small></span>
         <span class="pct">${Math.round(w.u * 100)}%</span>
         <span class="ubar"><i style="width:${Math.min(100, w.u * 100)}%"></i></span>
         <span class="why"><span class="mode">${w.modeLabel}</span>${esc(w.advice)}</span>
@@ -981,17 +982,16 @@
       model: S.model, mode: S.mode, view: S.view, sim: S.sim, report: S.report,
       live: S.live, liveChecks: S.liveChecks, mechanismNode: S.mechanismNode,
       hover: S.hover, selection: S.selection, preview: S.preview, highlight: S.highlight,
-      tooltip: S.tooltip, material: S.material, clock: S.clock,
+      tooltip: S.tooltip, clock: S.clock,
     });
     requestAnimationFrame(frame);
   }
 
   /* ---------------- Boot ---------------- */
   function boot() {
-    buildMaterialButtons();
     fillPresets();
-    S.model = loadSaved() || BS.makePreset('pratt', 18, false, 10000);
-    setMaterialButtons('steel');
+    fillPieceMaterials();
+    S.model = loadSaved() || BS.makePreset('pratt', 0.5, false, S.mass);
     setTool('build');
     setMode('build');
     changed();
