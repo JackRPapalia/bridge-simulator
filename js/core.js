@@ -217,8 +217,106 @@
     return e ? Math.hypot(e.b.x - e.a.x, e.b.y - e.a.y, e.b.z - e.a.z) : 0;
   }
 
+  /* A joint glued part-way along side member `memberId` (t from its end a). The beam stays one
+   * continuous piece; the joint rides on it, and whatever is attached there bends the beam. */
+  function attachNode(model, memberId, t) {
+    const n = { id: model.nextId++, x: 0, y: 0, fixed: false, on: { member: memberId, t } };
+    model.nodes.push(n);
+    syncAttached(model);
+    return n;
+  }
+
+  /* Put every attached joint back on its beam (after edits move the beam's ends). Joints only
+   * ever attach to beams that existed before them, so going in id order resolves chains. */
+  function syncAttached(model) {
+    const nm = nodeMap(model);
+    for (const n of [...model.nodes].sort((p, q) => p.id - q.id)) {
+      if (!n.on) continue;
+      const m = model.members.find((mm) => mm.id === n.on.member);
+      if (!m) { delete n.on; continue; }
+      const a = nm.get(m.a);
+      const b = nm.get(m.b);
+      n.x = +(a.x + (b.x - a.x) * n.on.t).toFixed(5);
+      n.y = +(a.y + (b.y - a.y) * n.on.t).toFixed(5);
+      n.fixed = false;
+    }
+  }
+
+  /* Independent joints that a joint's position follows, with weights (itself if it is not attached). */
+  function masters(model, id, map, depth = 0) {
+    const nm = map || nodeMap(model);
+    const n = nm.get(id);
+    if (!n?.on || depth > 50) return [{ node: id, w: 1 }];
+    const m = model.members.find((mm) => mm.id === n.on.member);
+    if (!m) return [{ node: id, w: 1 }];
+    const out = [];
+    for (const [end, w] of [[m.a, 1 - n.on.t], [m.b, n.on.t]]) {
+      for (const x of masters(model, end, nm, depth + 1)) out.push({ node: x.node, w: x.w * w });
+    }
+    return out;
+  }
+
+  /* Angles between neighbouring members at a joint. dirs: directions (radians) of the members
+   * leaving the joint. Returns [{from, gap}] for every gap under 180° (a straight run has none). */
+  function jointGaps(dirs) {
+    if (dirs.length < 2) return [];
+    const a = dirs.map((d) => (d + 2 * Math.PI) % (2 * Math.PI)).sort((p, q) => p - q);
+    const out = [];
+    for (let i = 0; i < a.length; i++) {
+      const from = a[i];
+      const gap = (i + 1 < a.length ? a[i + 1] : a[0] + 2 * Math.PI) - from;
+      if (gap > 1e-3 && gap < Math.PI - 1e-3) out.push({ from, gap });
+    }
+    return out;
+  }
+
+  /* Directions of the truss members at a joint in the side view (x right, y up). */
+  function sideJointDirs(model, id, map) {
+    const nm = map || nodeMap(model);
+    const n = nm.get(id);
+    const dirs = [];
+    for (const m of model.members) {
+      if (m.a !== id && m.b !== id) continue;
+      const o = nm.get(m.a === id ? m.b : m.a);
+      dirs.push(Math.atan2(o.y - n.y, o.x - n.x));
+    }
+    const host = n.on && model.members.find((mm) => mm.id === n.on.member);
+    if (host) {
+      const a = nm.get(host.a); const b = nm.get(host.b);
+      const d = Math.atan2(b.y - a.y, b.x - a.x);
+      dirs.push(d, d + Math.PI);
+    }
+    return dirs;
+  }
+
+  /* Directions at a joint in the top view (x right, z up the screen): chords at its height and
+   * the top-view pieces attached on that truss. */
+  function planJointDirs(model, id, side, map) {
+    const nm = map || nodeMap(model);
+    const n = nm.get(id);
+    const z = sideZ(model, side);
+    const dirs = [];
+    for (const m of model.members) {
+      if (m.a !== id && m.b !== id) continue;
+      const o = nm.get(m.a === id ? m.b : m.a);
+      if (Math.abs(o.y - n.y) < 1e-6) dirs.push(o.x > n.x ? 0 : Math.PI);
+    }
+    const host = n.on && model.members.find((mm) => mm.id === n.on.member);
+    if (host && Math.abs(nm.get(host.a).y - nm.get(host.b).y) < 1e-6) dirs.push(0, Math.PI);
+    for (const p of model.plan) {
+      const here = p.a.n === id && p.a.s === side ? p.a : p.b.n === id && p.b.s === side ? p.b : null;
+      if (!here) continue;
+      const far = here === p.a ? p.b : p.a;
+      dirs.push(Math.atan2(sideZ(model, far.s) - z, nm.get(far.n).x - n.x));
+    }
+    return dirs;
+  }
+
+  const deg = (rad) => `${Math.round((rad * 180) / Math.PI)}°`;
+
   function removeMember(model, id) {
     model.members = model.members.filter((m) => m.id !== id);
+    for (const n of model.nodes) if (n.on && n.on.member === id) delete n.on;
     model.loads = model.loads.filter((l) => l.member !== id);
   }
 
@@ -339,7 +437,8 @@
     cm, newtons, kgLabel, sideName,
     terrainOf, onTerrain,
     createModel, upgradeModel, cloneModel, nodeMap, addNode, findNode, findMemberBetween, addMember,
-    findPlanBetween, addPlan, memberLength, sideZ, planEnds, planLength,
+    findPlanBetween, addPlan, memberLength, sideZ, planEnds, planLength, attachNode, syncAttached, masters,
+    jointGaps, sideJointDirs, planJointDirs, deg,
     removeMember, removePlan, removeNode, removeLoad, usedNodes, pruneOrphans, loadInfo, loadPoint, levelsOf, designStats,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

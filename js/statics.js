@@ -92,9 +92,17 @@
     }
     for (const nodes of levels.values()) {
       const ids = new Set(nodes.map((nd) => nd.id));
+      // A joint glued to a beam lying flat at this height follows that beam; others get their own DOFs.
+      const follow = new Map();
+      for (const nd of nodes) {
+        if (!nd.on) continue;
+        const ms = BS.masters(model, nd.id, nm);
+        if (ms.every((x) => ids.has(x.node))) follow.set(nd.id, ms);
+      }
       const dof = new Map();
       let n = 0;
       for (const nd of nodes) {
+        if (follow.has(nd.id)) continue;
         for (const s of [0, 1]) {
           const key = `${nd.id}:${s}`;
           if (nd.fixed) { braced.add(key); continue; }
@@ -102,27 +110,45 @@
           dof.set(key, [n, n + 1]); n += 2;
         }
       }
+      // DOFs a joint's position is made of: [[xDof, zDof, weight], ...].
+      const expand = (id, s) => (follow.get(id) || [{ node: id, w: 1 }])
+        .map(({ node, w }) => [...(dof.get(`${node}:${s}`) || [undefined, undefined]), w]);
       const bars = [];
       for (const m of model.members) {
         if (!ids.has(m.a) || !ids.has(m.b)) continue;
-        for (const s of [0, 1]) bars.push([`${m.a}:${s}`, `${m.b}:${s}`, nm.get(m.a).x, BS.sideZ(model, s), nm.get(m.b).x, BS.sideZ(model, s)]);
+        for (const s of [0, 1]) bars.push([[m.a, s], [m.b, s]]);
       }
       for (const p of model.plan) {
         if (!ids.has(p.a.n) || !ids.has(p.b.n)) continue;
-        bars.push([`${p.a.n}:${p.a.s}`, `${p.b.n}:${p.b.s}`, nm.get(p.a.n).x, BS.sideZ(model, p.a.s), nm.get(p.b.n).x, BS.sideZ(model, p.b.s)]);
+        bars.push([[p.a.n, p.a.s], [p.b.n, p.b.s]]);
       }
       const free = [...dof.entries()].filter(([, d]) => d[1] !== undefined);
       if (!free.length || !bars.length) continue;
       const K = new Float64Array(n * n);
       let kmax = 0;
-      for (const [ka, kb, xa, za, xb, zb] of bars) {
+      for (const [[ia, sa], [ib, sb]] of bars) {
+        const xa = nm.get(ia).x; const za = BS.sideZ(model, sa);
+        const xb = nm.get(ib).x; const zb = BS.sideZ(model, sb);
         const L = Math.hypot(xb - xa, zb - za);
         if (L < 1e-9) continue;
         const k = (mat.E * mat.A) / L;
         kmax = Math.max(kmax, k);
-        const da = dof.get(ka) || [undefined, undefined];
-        const db = dof.get(kb) || [undefined, undefined];
-        addBar(K, n, [da[0], da[1], db[0], db[1]], k, (xb - xa) / L, (zb - za) / L);
+        const c = (xb - xa) / L; const sn = (zb - za) / L;
+        // Elongation = sum over terms of coef * (c*ux + s*uz).
+        const terms = [];
+        for (const [dx, dz, w] of expand(ib, sb)) terms.push([dx, dz, w]);
+        for (const [dx, dz, w] of expand(ia, sa)) terms.push([dx, dz, -w]);
+        for (const [ix, iz, wi] of terms) {
+          for (const [jx, jz, wj] of terms) {
+            const kw = k * wi * wj;
+            const rows = [[ix, c], [iz, sn]];
+            const cols = [[jx, c], [jz, sn]];
+            for (const [r, cr] of rows) {
+              if (r === undefined) continue;
+              for (const [q, cq] of cols) if (q !== undefined) K[r * n + q] += kw * cr * cq;
+            }
+          }
+        }
       }
       // A faint spring to ground on every DOF keeps the matrix solvable; a joint that only that
       // spring holds moves enormously under a unit push, so it counts as unbraced.
@@ -132,6 +158,10 @@
       const sol = solve(K, rhs, n, 1e-15);
       if (!sol.ok) continue;
       free.forEach(([key, d], i) => { if (sol.xs[i][d[1]] * kmax < 1e5) braced.add(key); });
+      // A glued joint is braced when the beam ends it follows are.
+      for (const [id, ms] of follow) {
+        for (const s of [0, 1]) if (ms.every((x) => braced.has(`${x.node}:${s}`))) braced.add(`${id}:${s}`);
+      }
     }
     return braced;
   }
@@ -179,8 +209,11 @@
   }
 
   /* Analyse the intact design. Dead load = self weight, live load = the placed weights.
-   * Forces are kept separate so the live load can be scaled for the capacity estimate. */
+   * Forces are kept separate so the live load can be scaled for the capacity estimate.
+   * Joints glued part-way along a beam have no freedom of their own: they follow the beam's ends,
+   * and the force they pass into the beam is kept so the beam can be checked for it. */
   function analyze(model) {
+    BS.syncAttached(model);
     const nm = BS.nodeMap(model);
     if (!model.members.length) return { ok: false, reason: 'empty' };
     const used = BS.usedNodes(model);
@@ -191,8 +224,13 @@
     const dofNode = [];
     let n = 0;
     for (const nd of model.nodes) {
-      if (used.has(nd.id) && !nd.fixed) { dof.set(nd.id, n); dofNode.push(nd.id, nd.id); n += 2; }
+      if (used.has(nd.id) && !nd.fixed && !nd.on) { dof.set(nd.id, n); dofNode.push(nd.id, nd.id); n += 2; }
     }
+    const mcache = new Map();
+    const mastersOf = (id) => {
+      if (!mcache.has(id)) mcache.set(id, BS.masters(model, id, nm));
+      return mcache.get(id);
+    };
 
     const geom = model.members.map((m) => {
       const a = nm.get(m.a);
@@ -203,47 +241,109 @@
       return { id: m.id, a: m.a, b: m.b, L, c: dx / L, s: dy / L };
     });
 
-    // Loads per truss: f[side] = { D, L } vectors.
-    const f = [0, 1].map(() => ({ D: new Float64Array(n), L: new Float64Array(n) }));
-    const addFy = (vec, id, fy) => { const i = dof.get(id); if (i !== undefined) vec[i + 1] += fy; };
-
+    // Point loads per truss and joint (before they are passed to independent joints).
+    const pl = [0, 1].map(() => new Map());
+    const addP = (s, id, kind, fy) => {
+      if (!pl[s].has(id)) pl[s].set(id, { D: 0, L: 0 });
+      pl[s].get(id)[kind] += fy;
+    };
     for (const g of geom) {
       const W = BS.linearMass(mat) * g.L * BS.G;
-      for (const s of [0, 1]) { addFy(f[s].D, g.a, -W / 2); addFy(f[s].D, g.b, -W / 2); }
+      for (const s of [0, 1]) { addP(s, g.a, 'D', -W / 2); addP(s, g.b, 'D', -W / 2); }
     }
     const planGeom = model.plan.map((p) => ({ p, L: BS.planLength(model, p, nm) }));
     for (const { p, L } of planGeom) {
       const W = BS.linearMass(mat) * L * BS.G;
-      addFy(f[p.a.s].D, p.a.n, -W / 2);
-      addFy(f[p.b.s].D, p.b.n, -W / 2);
+      addP(p.a.s, p.a.n, 'D', -W / 2);
+      addP(p.b.s, p.b.n, 'D', -W / 2);
     }
-
     const infos = [];
     for (const l of model.loads) {
       const info = BS.loadInfo(model, l, nm);
       if (!info) continue;
       for (const tm of info.terms) {
         if (!used.has(tm.node) && !nm.get(tm.node)?.fixed) return { ok: false, reason: 'mechanism', nodeId: tm.node, side: tm.s };
-        addFy(f[tm.s].L, tm.node, -l.mass * BS.G * tm.c);
+        addP(tm.s, tm.node, 'L', -l.mass * BS.G * tm.c);
       }
       infos.push({ load: l, info });
     }
+
+    const f = [0, 1].map(() => ({ D: new Float64Array(n), L: new Float64Array(n) }));
+    for (const s of [0, 1]) {
+      for (const [id, P] of pl[s]) {
+        for (const { node, w } of mastersOf(id)) {
+          const i = dof.get(node);
+          if (i === undefined) continue;
+          f[s].D[i + 1] += P.D * w;
+          f[s].L[i + 1] += P.L * w;
+        }
+      }
+    }
+
+    // Elongation of a bar as weights on the independent DOFs: e = sum(coef * (c ux + s uy)).
+    const barTerms = (g) => {
+      const t = [];
+      for (const { node, w } of mastersOf(g.b)) if (dof.has(node)) t.push([dof.get(node), w]);
+      for (const { node, w } of mastersOf(g.a)) if (dof.has(node)) t.push([dof.get(node), -w]);
+      return t;
+    };
+    geom.forEach((g) => { g.terms = barTerms(g); });
 
     let u = [[new Float64Array(n), new Float64Array(n)], [new Float64Array(n), new Float64Array(n)]];
     if (n > 0) {
       const K = new Float64Array(n * n);
       for (const g of geom) {
-        const ia = dof.get(g.a); const ib = dof.get(g.b);
-        addBar(K, n, [ia, ia === undefined ? undefined : ia + 1, ib, ib === undefined ? undefined : ib + 1],
-          (mat.E * mat.A) / g.L, g.c, g.s);
+        const k = (mat.E * mat.A) / g.L;
+        const cc = g.c * g.c; const cs = g.c * g.s; const ss = g.s * g.s;
+        for (const [i, wi] of g.terms) {
+          for (const [j, wj] of g.terms) {
+            const kw = k * wi * wj;
+            K[i * n + j] += kw * cc; K[i * n + j + 1] += kw * cs;
+            K[(i + 1) * n + j] += kw * cs; K[(i + 1) * n + j + 1] += kw * ss;
+          }
+        }
       }
       const sol = solve(K, [f[0].D, f[0].L, f[1].D, f[1].L], n);
       if (!sol.ok) return { ok: false, reason: 'mechanism', nodeId: dofNode[sol.badDof], side: 0 };
       u = [[sol.xs[0], sol.xs[1]], [sol.xs[2], sol.xs[3]]];
     }
-    const dispOf = (vec, id, k) => { const i = dof.get(id); return i === undefined ? 0 : vec[i + k]; };
-    const elong = (vec, g) =>
-      g.c * (dispOf(vec, g.b, 0) - dispOf(vec, g.a, 0)) + g.s * (dispOf(vec, g.b, 1) - dispOf(vec, g.a, 1));
+    const elong = (vec, g) => g.terms.reduce((sum, [i, w]) => sum + w * (g.c * vec[i] + g.s * vec[i + 1]), 0);
+    const dispY = (vec, id) => mastersOf(id).reduce((sum, { node, w }) => {
+      const i = dof.get(node);
+      return i === undefined ? sum : sum + w * vec[i + 1];
+    }, 0);
+
+    // Axial forces per truss, dead and live.
+    const N = [0, 1].map((s) => new Map(geom.map((g) => {
+      const k = (mat.E * mat.A) / g.L;
+      return [g.id, { D: k * elong(u[s][0], g), L: k * elong(u[s][1], g) }];
+    })));
+
+    // What each attached joint pushes into its beam: the pull of its members plus loads on it.
+    const hostLoads = [0, 1].map(() => new Map());
+    for (const nd of model.nodes) {
+      if (!nd.on || !used.has(nd.id)) continue;
+      const host = geom.find((g) => g.id === nd.on.member);
+      if (!host) continue;
+      for (const s of [0, 1]) {
+        const F = { D: [0, 0], L: [0, 0] };
+        for (const g of geom) {
+          if (g.a !== nd.id && g.b !== nd.id) continue;
+          const sign = g.a === nd.id ? 1 : -1; // unit vector from this joint toward the far end
+          const f2 = N[s].get(g.id);
+          F.D[0] += f2.D * g.c * sign; F.D[1] += f2.D * g.s * sign;
+          F.L[0] += f2.L * g.c * sign; F.L[1] += f2.L * g.s * sign;
+        }
+        const P = pl[s].get(nd.id);
+        if (P) { F.D[1] += P.D; F.L[1] += P.L; }
+        if (!hostLoads[s].has(host.id)) hostLoads[s].set(host.id, []);
+        hostLoads[s].get(host.id).push({
+          t: nd.on.t,
+          aD: F.D[0] * host.c + F.D[1] * host.s, aL: F.L[0] * host.c + F.L[1] * host.s,
+          pD: -F.D[0] * host.s + F.D[1] * host.c, pL: -F.L[0] * host.s + F.L[1] * host.c,
+        });
+      }
+    }
 
     const braced = lateralBracing(model, nm);
     const Lout = sidewaysLengths(model, nm, braced);
@@ -251,7 +351,6 @@
     const items = [];
     for (const s of [0, 1]) {
       for (const g of geom) {
-        const k = (mat.E * mat.A) / g.L;
         const perp = Math.abs(g.c);
         const MD = (BS.linearMass(mat) * BS.G * perp * g.L * g.L) / 8;
         let ML = 0;
@@ -262,7 +361,7 @@
         }
         items.push({
           key: `${g.id}:${s}`, kind: 'member', id: g.id, side: s, L: g.L, Lout: Lout.get(`${g.id}:${s}`),
-          ND: k * elong(u[s][0], g), NL: k * elong(u[s][1], g), MD, ML,
+          ND: N[s].get(g.id).D, NL: N[s].get(g.id).L, MD, ML, att: hostLoads[s].get(g.id) || null,
         });
       }
     }
@@ -278,19 +377,42 @@
     let maxDeflection = 0;
     for (const { info } of infos) {
       let dy = 0;
-      for (const tm of info.terms) dy += tm.c * (dispOf(u[tm.s][0], tm.node, 1) + dispOf(u[tm.s][1], tm.node, 1));
+      for (const tm of info.terms) dy += tm.c * (dispY(u[tm.s][0], tm.node) + dispY(u[tm.s][1], tm.node));
       maxDeflection = Math.max(maxDeflection, -dy);
     }
 
     return { ok: true, items, mat, maxDeflection, braced, Lout };
   }
 
+  /* Check a beam that has joints glued part-way along it. att: [{t, ax, perp}] forces the joints
+   * push into the beam (along it, and across it). The push/pull changes at each joint, so every
+   * stretch of the beam is checked; the sideways forces bend it like weights would. */
+  function checkWithAttachments(mat, L, N0, M0, att, opts) {
+    let M = M0;
+    for (const a of att) M += Math.abs(a.perp) * a.t * (1 - a.t) * L;
+    const cuts = [0, ...att.map((a) => a.t).sort((p, q) => p - q), 1];
+    let worst = null;
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const x = (cuts[i] + cuts[i + 1]) / 2;
+      let Ns = N0;
+      for (const a of att) Ns += x < a.t ? a.ax * (1 - a.t) : -a.ax * a.t;
+      const chk = BS.checkMember(mat, L, Ns, M, opts);
+      if (!worst || chk.u > worst.u) worst = chk;
+    }
+    return worst;
+  }
+
   /* Member checks with the live load scaled by k. */
   function utilisations(res, k) {
-    return res.items.map((it) => ({
-      ...it,
-      ...BS.checkMember(res.mat, it.L, it.ND + k * it.NL, it.MD + k * it.ML, { Lout: it.Lout, flat: it.flat }),
-    }));
+    return res.items.map((it) => {
+      const opts = { Lout: it.Lout, flat: it.flat };
+      const N0 = it.ND + k * it.NL;
+      const M0 = it.MD + k * it.ML;
+      const chk = it.att
+        ? checkWithAttachments(res.mat, it.L, N0, M0, it.att.map((a) => ({ t: a.t, ax: a.aD + k * a.aL, perp: a.pD + k * a.pL })), opts)
+        : BS.checkMember(res.mat, it.L, N0, M0, opts);
+      return { ...it, ...chk };
+    });
   }
 
   /* Largest live-load factor k such that no member exceeds u = 1 (linear, by bisection). */
@@ -327,6 +449,7 @@
       case 'tension':
         return 'Pulled past its tensile strength. Make the truss deeper, or add a diagonal that shares the pull.';
       case 'bending':
+        if (c.att && c.att.length) return 'A piece glued part-way along this beam bends it. Move the glued joint to a proper joint, or brace the beam right under it.';
         return c.kind === 'plan'
           ? 'Bends under the weight resting on it. Move the weight nearer a truss, add a piece under it, or shorten this span.'
           : 'The weight sits between joints and bends this piece. Put a joint under the weight or shorten this piece.';
@@ -399,7 +522,7 @@
   }
 
   Object.assign(BS, {
-    solveLinear: solve, analyze, lateralBracing, sidewaysLengths, utilisations, loadFactor, buildReport,
+    solveLinear: solve, analyze, checkWithAttachments, lateralBracing, sidewaysLengths, utilisations, loadFactor, buildReport,
     MODE_LABEL, itemName, itemWhere,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

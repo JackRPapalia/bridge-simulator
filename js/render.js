@@ -323,6 +323,13 @@
         ctx.setLineDash([]);
       }
 
+      if (st.angles && (st.mode === 'build' || st.view === 'weak')) {
+        const used = BS.usedNodes(model);
+        for (const n of model.nodes) {
+          if (!used.has(n.id)) continue;
+          this.drawAngles(this.sx(n.x), this.sy(n.y), BS.sideJointDirs(model, n.id, nm), this.sideMinLen(model, nm, n) * this.cam.scale);
+        }
+      }
       this.drawPreview(st);
       this.drawNodes(st, (n) => ({ x: n.x, y: n.y }));
       this.drawWeights(st, model.loads.map((l) => ({ load: l, pos: BS.loadPoint(model, l, nm) })));
@@ -364,7 +371,8 @@
       ctx.setLineDash([6, 5]);
       this.line(p.x0, p.y0, p.x1, p.y1);
       ctx.setLineDash([]);
-      const text = p.reason || BS.cm(p.len != null ? p.len : Math.hypot(p.x1 - p.x0, p.y1 - p.y0));
+      for (const sp of p.snaps || []) this.diamond(this.sx(sp.x), this.sy(sp.y), 7, this.c.accent, this.c.sheet);
+      const text = p.reason || p.label || BS.cm(p.len != null ? p.len : Math.hypot(p.x1 - p.x0, p.y1 - p.y0));
       ctx.font = `500 12px ${this.font.data}`;
       const tw = ctx.measureText(text).width;
       const mx = Math.max(tw / 2 + 8, Math.min(this.w - tw / 2 - 8, this.sx((p.x0 + p.x1) / 2)));
@@ -374,6 +382,60 @@
       ctx.fillStyle = rgb(this.c.sheet);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(text, mx, my);
+    }
+
+    /* A joint glued onto a beam is drawn as a diamond; a joint between pieces as a circle. */
+    diamond(x, y, r, fill, stroke) {
+      const ctx = this.ctx;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath();
+      ctx.fillStyle = rgb(fill);
+      ctx.fill();
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = rgb(stroke);
+      ctx.stroke();
+    }
+
+    /* Angle arcs between neighbouring members at a joint, with degree labels.
+     * dirs: world directions (radians, counter-clockwise); minPx: shortest member there, in pixels. */
+    drawAngles(px, py, dirs, minPx) {
+      const gaps = BS.jointGaps(dirs);
+      if (!gaps.length || minPx < 30) return;
+      const ctx = this.ctx;
+      const r = Math.max(11, Math.min(22, minPx * 0.28));
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = rgb(this.c.accent, 0.7);
+      ctx.font = `500 10px ${this.font.data}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const g of gaps) {
+        ctx.beginPath();
+        ctx.arc(px, py, r, -(g.from + g.gap), -g.from);
+        ctx.stroke();
+        if (g.gap < 0.16) continue;
+        const mid = g.from + g.gap / 2;
+        const lr = r + (g.gap < 0.6 ? 14 : 10);
+        const lx = px + Math.cos(mid) * lr; const ly = py - Math.sin(mid) * lr;
+        const t = BS.deg(g.gap);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = rgb(this.c.sheet, 0.9);
+        ctx.strokeText(t, lx, ly);
+        ctx.fillStyle = rgb(this.c.ink);
+        ctx.fillText(t, lx, ly);
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = rgb(this.c.accent, 0.7);
+      }
+    }
+
+    /* Shortest piece meeting a joint in the side view, in metres (glued joints count the beam on each side). */
+    sideMinLen(model, nm, n) {
+      let min = Infinity;
+      for (const m of model.members) {
+        if (m.a !== n.id && m.b !== n.id) continue;
+        min = Math.min(min, BS.memberLength(model, m, nm));
+      }
+      const host = n.on && model.members.find((mm) => mm.id === n.on.member);
+      if (host) min = Math.min(min, BS.memberLength(model, host, nm) * Math.min(n.on.t, 1 - n.on.t));
+      return min;
     }
 
     nodeRadius() { return Math.max(3, Math.min(6, this.cam.scale * 0.005)); }
@@ -388,6 +450,7 @@
         const x = this.sx(p.x); const y = this.sy(p.y);
         if (n.fixed) this.drawAnchor(x, y, r);
         const hot = (st.hover?.type === 'node' && st.hover.id === n.id) || (st.selection?.type === 'node' && st.selection.id === n.id);
+        if (n.on) { this.diamond(x, y, (hot ? r + 2 : r) + 1.5, hot ? this.c.accent : this.c.sheet, this.c.ink); continue; }
         ctx.beginPath();
         ctx.arc(x, y, hot ? r + 2 : r, 0, Math.PI * 2);
         ctx.fillStyle = rgb(hot ? this.c.accent : this.c.sheet);
@@ -641,6 +704,15 @@
             ctx.fillStyle = rgb(this.c.ink);
             ctx.fillRect(px - r - 2, py - r - 2, 2 * r + 4, 2 * r + 4);
           }
+          if (!sim && st.angles && (st.mode === 'build' || st.view === 'weak')) {
+            const dirs = BS.planJointDirs(model, n.id, s, nm);
+            let min = model.width;
+            for (const m of model.members) {
+              if ((m.a === n.id || m.b === n.id) && sameY(nm.get(m.a).y, nm.get(m.b).y)) min = Math.min(min, BS.memberLength(model, m, nm));
+            }
+            this.drawAngles(px, py, dirs, min * this.cam.scale);
+          }
+          if (n.on) { this.diamond(px, py, (hotJ ? r + 2 : r) + 1.5, hotJ ? this.c.accent : this.c.sheet, this.c.ink); continue; }
           ctx.beginPath();
           ctx.arc(px, py, hotJ ? r + 2 : r, 0, Math.PI * 2);
           ctx.fillStyle = rgb(hotJ ? this.c.accent : this.c.sheet);

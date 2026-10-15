@@ -21,12 +21,14 @@ Switch views with the **Side view / Top view** buttons or `T`.
 
 | Tool | Key | Side view | Top view |
 | --- | --- | --- | --- |
-| Build | `B` | Drag from point to point to add a truss member (used for both trusses). Joints on the tables become anchors. | Pick a height in the Height bar, then drag from a joint on one truss to a joint on the other to add a cross piece or diagonal brace. |
-| Select | `V` | Drag joints or weights. Click a member to see its length and limits. | Click a piece, joint or weight to inspect it. Drag weights across the deck. |
+| Build | `B` | Drag from point to point to add a truss member (used for both trusses). Start or end anywhere along an existing beam to glue onto it. Joints on the tables become anchors. | Pick a height in the Height bar, then drag from one truss to the other to add a cross piece or diagonal brace. Start or end anywhere along a chord to glue onto it. |
+| Select | `V` | Drag joints or weights. Glued joints slide along their beam. Click a member to see its length and limits. | Click a piece, joint or weight to inspect it. Drag weights across the deck. |
 | Weight | `W` | Click a joint or beam. The weight sits in the middle of the deck, shared by both trusses. | Click a cross piece, brace or joint to put the weight exactly there. Off-centre weights load one truss more. |
 | Anchor | `A` | Pin a joint down, or release it. Anchors must sit on a table, the floor or the support block. | Not used (anchors come from the side view). |
 | Erase | `E` | Click or drag across parts to delete them. | Deletes top-view pieces and weights. |
 
+- **Gluing onto a beam:** when the cursor is near a beam but not a joint, the end snaps onto the beam (to the nearest 0.5 cm along it with grid snap on, and the preview shows the distance). The beam is **not split**: it stays one stick, the new joint (drawn as a diamond) rides on it, and whatever is attached there bends the beam.
+- **Joint angles:** every joint shows the angles between neighbouring members, in both views. The preview shows a new piece's angle from horizontal, and the joint panel lists its angles. Turn the arcs off with "Show joint angles".
 - **Piece:** pick the material (balsa, basswood, birch craft stick, pine, dry spaghetti, aluminium or steel) and set the width, thickness and maximum length in cm. The panel shows the piece's tension limit, push limit and mass per cm. Members longer than one piece are drawn dashed red and flagged in the report.
 - **Run the test:** `Enter`. `Esc` stops it.
 - **Undo / redo:** `Ctrl+Z` / `Ctrl+Shift+Z`.
@@ -56,17 +58,18 @@ Each piece is treated as a solid rectangle. Width lies in the plane of the bridg
 Joints are pins, so members carry only axial force. The one exception is a weight resting between two joints, which also bends the piece under it.
 
 - **Two trusses:** each side truss is solved in its own plane. A weight placed in the side view is split 50/50; a weight placed in the top view is split by where it sits across the deck (a weight 20% of the way from the front truss puts 80% on the front).
+- **Glued joints:** a joint glued part-way along a beam follows the beam exactly (at fraction t, it sits at (1 − t)·a + t·b). The force it passes in is split into a part across the beam, which bends it like a weight would, and a part along it, which changes the push or pull on either side of the joint; every stretch of the beam is checked. The whole beam length counts for buckling, because one glued joint does not reliably brace it.
 - **Top-view pieces** carry weights across the deck by bending (they lie flat, so thickness is the bending depth) and brace the trusses sideways.
 - **Sideways buckling:** a compression chord can bow out of its truss plane over the distance between braced joints. A joint counts as braced if the top-view pieces and chords at its height form a rigid (triangulated) frame seen from above. Cross pieces alone form rectangles that can shift, so they don't brace. Joints joined straight to an anchor (the end posts) are treated as braced, assuming the glued end frames are stiff enough to carry bracing forces to the supports.
 
 - **Static analysis** (`js/statics.js`): uses the direct stiffness method. Self weight and the placed weights are solved separately, so the live load can be scaled to find the capacity. Cables that would go into compression are switched off one by one until the solution is consistent. A singular stiffness matrix means a mechanism, and the joint that can move is flagged.
-- **Dynamic test** (`js/physics.js`): uses small-step XPBD with 160 substeps per frame. Each member is a distance constraint with compliance `L / (E·A)`, so the constraint impulse is the real axial force. Self weight comes on first. The weights then ramp up over 2 s, and a member is removed as soon as it reaches 100% utilisation.
+- **Dynamic test** (`js/physics.js`): steps the bridge 200–800 times per frame. Each member is a spring that obeys Hooke's law exactly (`F = EA·ΔL/L`, with a dashpot to calm vibration), so redundant structures share force the same way as in the static solver. Weights hang on hard position constraints. Joint inertia is raised where needed to keep the stiff springs stable; gravity acts only on the real mass. Self weight comes on first. The weights then ramp up over 2 s, and a member is removed as soon as it reaches 100% utilisation.
 - **Member check** (`js/core.js`): `u = |N| / N_cap + M / M_cap`.
   - Tension limit: `ft·A`.
   - Compression limit: `min(fc·A, π²EI/L²)`, the lower of crushing and Euler buckling.
   - Bending limit: `fb·S`.
 
-The test suite checks the two solvers against each other: on a Pratt truss, the forces in the dynamic test match the static solution to within 2%, an overloaded truss breaks within 10% of the static capacity estimate, removing the top bracing makes the top chord fail sideways at well under half the load, and a cross piece overloaded in bending breaks within 10% of its predicted load.
+The test suite checks the two solvers against each other: on a Pratt truss, the forces in the dynamic test match the static solution to within 2%, an overloaded truss breaks within 10% of the static capacity estimate, removing the top bracing makes the top chord fail sideways at well under half the load, and a cross piece overloaded in bending breaks within 10% of its predicted load, a redundant (statically indeterminate) truss and a truss with a glued-on brace match the static forces to within 2%, and a beam bent by a glued joint breaks within 10% of its predicted load.
 
 ```
 node test/physics.test.js

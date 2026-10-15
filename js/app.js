@@ -18,6 +18,7 @@
     mass: 10,
     snap: true,
     live: false,
+    angles: true,
     liveChecks: null,
     mechanismNode: null,
     hover: null,
@@ -94,6 +95,7 @@
 
   /* Call after any edit to the model. */
   function changed() {
+    BS.syncAttached(S.model);
     save();
     if (S.selection && !selectionExists(S.selection)) S.selection = null;
     refreshLive();
@@ -134,14 +136,14 @@
 
   const HINTS = {
     side: {
-      build: 'Drag from point to point to add a piece. This truss is used for both the front and back of the bridge. Joints on the tables become anchors.',
+      build: 'Drag from point to point to add a piece. Start or end on a beam to join it part-way along. This truss is used for both the front and back. Joints on the tables become anchors.',
       select: 'Drag joints or weights to move them. Click a member to see its length and limits. Drag empty space to pan.',
       weight: 'Click a joint or a beam. Weights placed here sit in the middle of the deck, shared by both trusses.',
       anchor: 'Click a joint on a table, the floor or the support block to pin it or release it. Click a surface to add an anchor.',
       erase: 'Click or drag across members, joints and weights to delete them.',
     },
     top: {
-      build: 'Pick a height above, then drag from a joint on one truss to a joint on the other to add a cross piece or brace.',
+      build: 'Pick a height above, then drag from one truss to the other to add a cross piece or brace. Start or end part-way along a chord to add a joint there.',
       select: 'Click a top-view piece, joint or weight to inspect it. Drag weights to move them across the deck.',
       weight: 'Click a cross piece, brace or joint to place the weight exactly there across the deck.',
       anchor: 'Anchors are set in the side view.',
@@ -275,7 +277,7 @@
     if (best) return best;
     bd = MEMBER_PX;
     for (const p of model.plan) {
-      if (!at(p.a.n) || !at(p.b.n)) continue;
+      if (opts.chordsOnly || !at(p.a.n) || !at(p.b.n)) continue;
       const a = nm.get(p.a.n); const b = nm.get(p.b.n);
       const r = distToSeg(px, py, R.sx(a.x), R.sy(z(p.a.s)), R.sx(b.x), R.sy(z(p.b.s)));
       if (r.d < bd) { bd = r.d; best = { type: 'plan', id: p.id, t: r.t }; }
@@ -298,37 +300,65 @@
     return { x: +x.toFixed(4), y: +y.toFixed(4) };
   }
 
-  /* A point for building in the side view: an existing joint if close, otherwise a grid point. */
+  /* A point part-way along side member `id` (t from end a). With grid snap on, the distance from
+   * end a is rounded to 0.5 cm. Too close to an end gives that end's joint instead. */
+  function beamPoint(id, t) {
+    const m = S.model.members.find((mm) => mm.id === id);
+    const nm = BS.nodeMap(S.model);
+    const a = nm.get(m.a); const b = nm.get(m.b);
+    const L = Math.hypot(b.x - a.x, b.y - a.y);
+    let d = t * L;
+    if (S.snap) d = Math.round(d * 200) / 200;
+    if (d < 0.003) return { x: a.x, y: a.y, node: a };
+    if (L - d < 0.003) return { x: b.x, y: b.y, node: b };
+    const tt = d / L;
+    return { x: a.x + (b.x - a.x) * tt, y: a.y + (b.y - a.y) * tt, onMember: { id, t: tt, d, from: a.id } };
+  }
+
+  /* A point for building in the side view: an existing joint if close, then any point along a
+   * beam (it gets split there), otherwise a grid point. */
   function buildPoint(px, py, exclude) {
     const hit = hitSide(px, py, { noLoads: true, exclude });
     if (hit?.type === 'node') {
       const n = S.model.nodes.find((nn) => nn.id === hit.id);
       return { x: n.x, y: n.y, node: n };
     }
+    if (hit?.type === 'member') return beamPoint(hit.id, hit.t);
     const w = snapWorld(px, py);
     const existing = BS.findNode(S.model, w.x, w.y, 1e-6);
     return existing ? { x: existing.x, y: existing.y, node: existing } : w;
   }
 
+  const memberHas = (id, nodeId) => { const m = S.model.members.find((mm) => mm.id === id); return m && (m.a === nodeId || m.b === nodeId); };
+  const slopeDeg = (dx, dy) => BS.deg(Math.atan2(Math.abs(dy), Math.abs(dx)));
+  const snapNote = (pt) => (pt.onMember ? ` · ${BS.cm(pt.onMember.d)} along M${pt.onMember.id}` : '');
+
   function validateMember(p0, p1) {
     const mat = BS.memberMat(S.model);
     const L = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-    const base = { x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y };
+    const snaps = [p0, p1].filter((pt) => pt.onMember).map((pt) => ({ x: pt.x, y: pt.y }));
+    const base = { x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y, snaps, label: `${BS.cm(L)} · ${slopeDeg(p1.x - p0.x, p1.y - p0.y)}${snapNote(p1)}` };
     if (L < 0.005) return { ...base, valid: false, reason: '' };
+    if ((p1.onMember && p0.node && memberHas(p1.onMember.id, p0.node.id)) ||
+      (p0.onMember && p1.node && memberHas(p0.onMember.id, p1.node.id)) ||
+      (p0.onMember && p1.onMember && p0.onMember.id === p1.onMember.id)) {
+      return { ...base, valid: false, reason: 'That runs along the same beam' };
+    }
     if (L > mat.maxLen + 1e-9) return { ...base, valid: false, reason: `${BS.cm(L)} · longer than your ${BS.cm(mat.maxLen)} stick` };
     if (p0.node && p1.node && BS.findMemberBetween(S.model, p0.node.id, p1.node.id)) return { ...base, valid: false, reason: 'Already connected' };
     return { ...base, valid: true };
   }
 
-  /* Top-view piece from joint a to joint b ({n, s, x, z}). */
+  /* Top-view piece from point a to point b ({n, s, x, z}, or {s, x, z, onMember} part-way along a chord). */
   function validatePlan(a, b) {
     const mat = BS.memberMat(S.model);
-    const base = { x0: a.x, y0: a.z, x1: b.x, y1: b.z, flat: true };
-    if (!b.n) return { ...base, valid: false, reason: '' };
     const len = Math.hypot(b.x - a.x, b.z - a.z);
+    const snaps = [a, b].filter((pt) => pt.onMember).map((pt) => ({ x: pt.x, y: pt.z }));
+    const base = { x0: a.x, y0: a.z, x1: b.x, y1: b.z, flat: true, snaps, label: `${BS.cm(len)} · ${slopeDeg(b.x - a.x, b.z - a.z)}${snapNote(b)}` };
+    if (b.n == null && !b.onMember) return { ...base, valid: false, reason: '' };
     if (a.s === b.s) return { ...base, len, valid: false, reason: 'End on the other truss line' };
     if (len > mat.maxLen + 1e-9) return { ...base, len, valid: false, reason: `${BS.cm(len)} · longer than your ${BS.cm(mat.maxLen)} stick` };
-    if (BS.findPlanBetween(S.model, { n: a.n, s: a.s }, { n: b.n, s: b.s })) return { ...base, len, valid: false, reason: 'Already connected' };
+    if (a.n != null && b.n != null && BS.findPlanBetween(S.model, { n: a.n, s: a.s }, { n: b.n, s: b.s })) return { ...base, len, valid: false, reason: 'Already connected' };
     return { ...base, len, valid: true };
   }
 
@@ -337,8 +367,26 @@
     return { n: n.id, s: hit.side, x: n.x, z: BS.sideZ(S.model, hit.side) };
   }
 
+  /* A point for building in the top view: a joint at this height, or any point along a chord at
+   * this height (the chord gets split there, in both trusses). */
+  function planPoint(px, py, exclude) {
+    const hit = hitTop(px, py, { noLoads: true, exclude, chordsOnly: true });
+    if (hit?.type === 'joint') return jointPoint(hit);
+    if (hit?.type === 'member') {
+      const bp = beamPoint(hit.id, hit.t);
+      const z = BS.sideZ(S.model, hit.side);
+      if (bp.node) {
+        if (exclude && exclude.n === bp.node.id && exclude.s === hit.side) return null;
+        return { n: bp.node.id, s: hit.side, x: bp.x, z };
+      }
+      return { s: hit.side, x: bp.x, z, onMember: bp.onMember };
+    }
+    return null;
+  }
+
   function nodeFor(pt) {
     if (pt.node) return pt.node;
+    if (pt.onMember) return BS.attachNode(S.model, pt.onMember.id, pt.onMember.t);
     const terrain = BS.terrainOf(S.model);
     return BS.addNode(S.model, pt.x, pt.y, BS.onTerrain(terrain, pt.x, pt.y));
   }
@@ -564,6 +612,7 @@
       const terrain = BS.terrainOf(S.model);
       if (hit?.type === 'node') {
         const n = S.model.nodes.find((nn) => nn.id === hit.id);
+        if (n.on) { toast('This joint is glued onto a beam, so it cannot be an anchor.'); return; }
         if (!n.fixed && !BS.onTerrain(terrain, n.x, n.y)) { toast('Anchors must sit on a table, the floor or the support block.'); return; }
         pushUndo();
         n.fixed = !n.fixed;
@@ -587,13 +636,13 @@
   function topToolDown(p) {
     const tool = S.tool;
     if (tool === 'build') {
-      const hit = hitTop(p.x, p.y, { noLoads: true });
-      if (hit?.type !== 'joint') {
+      const start = planPoint(p.x, p.y);
+      if (!start) {
         if (!BS.levelsOf(S.model).length) toast('Build a truss in the side view first. Its joints appear here.');
-        else toast('Start on a joint. Pick another height above to see its joints.');
+        else toast('Start on a joint or a chord. Pick another height above to see its joints.');
         return;
       }
-      S.drag = { kind: 'plan', start: jointPoint(hit) };
+      S.drag = { kind: 'plan', start };
       S.preview = null;
       return;
     }
@@ -689,9 +738,21 @@
       return;
     }
     if (d.kind === 'plan') {
-      const hit = hitTop(p.x, p.y, { noLoads: true, exclude: { n: d.start.n, s: d.start.s } });
-      d.end = hit?.type === 'joint' ? jointPoint(hit) : { x: R.wx(p.x), z: R.wy(p.y) };
+      d.end = planPoint(p.x, p.y, d.start.n != null ? { n: d.start.n, s: d.start.s } : null) || { x: R.wx(p.x), z: R.wy(p.y) };
       S.preview = validatePlan(d.start, d.end);
+      return;
+    }
+    if (d.kind === 'moveNode' && d.node.on) {
+      const n = d.node;
+      const host = S.model.members.find((mm) => mm.id === n.on.member);
+      const nm = BS.nodeMap(S.model);
+      const a = nm.get(host.a); const b = nm.get(host.b);
+      const r = distToSeg(p.x, p.y, R.sx(a.x), R.sy(a.y), R.sx(b.x), R.sy(b.y));
+      const bp = beamPoint(host.id, r.t);
+      if (!bp.onMember || Math.abs(bp.onMember.t - n.on.t) < 1e-9) return;
+      if (!d.moved) { pushUndo(d.snap); d.moved = true; }
+      n.on.t = bp.onMember.t;
+      changed();
       return;
     }
     if (d.kind === 'moveNode') {
@@ -747,12 +808,14 @@
       S.preview = null;
       if (pv?.valid) {
         pushUndo();
-        const p = BS.addPlan(S.model, { n: d.start.n, s: d.start.s }, { n: d.end.n, s: d.end.s });
+        const na = d.start.n != null ? d.start.n : BS.attachNode(S.model, d.start.onMember.id, d.start.onMember.t).id;
+        const nb = d.end.n != null ? d.end.n : BS.attachNode(S.model, d.end.onMember.id, d.end.onMember.t).id;
+        const p = BS.addPlan(S.model, { n: na, s: d.start.s }, { n: nb, s: d.end.s });
         changed();
         if (p) select({ type: 'plan', id: p.id });
       } else if (pv?.reason) {
         toast(pv.reason);
-      } else {
+      } else if (d.start.n != null) {
         select({ type: 'joint', id: d.start.n, side: d.start.s });
       }
     }
@@ -867,15 +930,20 @@
       const deg = S.model.members.filter((m) => m.a === n.id || m.b === n.id).length;
       const plans = S.model.plan.filter((p) => (p.a.n === n.id && (sel.side == null || p.a.s === sel.side)) || (p.b.n === n.id && (sel.side == null || p.b.s === sel.side))).length;
       $('selTitle').textContent = `Joint J${n.id}${sel.side == null ? '' : ` · ${BS.sideName(sel.side)} truss`}`;
+      const dirs = sel.type === 'joint' ? BS.planJointDirs(S.model, n.id, sel.side, nm) : BS.sideJointDirs(S.model, n.id, nm);
+      const angles = BS.jointGaps(dirs).map((g) => BS.deg(g.gap)).join(', ') || 'none';
       body.innerHTML = `
         <dl class="kv">
           <dt>Position</dt><dd>${(n.x * 100).toFixed(1)}, ${(n.y * 100).toFixed(1)} cm</dd>
           <dt>Truss members</dt><dd>${deg}</dd>
           <dt>Top-view pieces</dt><dd>${plans}</dd>
-          <dt>Support</dt><dd>${n.fixed ? 'Pinned anchor' : 'Free joint'}</dd>
+          <dt>Angles ${sel.type === 'joint' ? 'seen from above' : 'between members'}</dt><dd>${angles}</dd>
+          <dt>Support</dt><dd>${n.fixed ? 'Pinned anchor' : n.on ? `Glued onto M${n.on.member}` : 'Free joint'}</dd>
+          ${n.on ? `<dt>Along M${n.on.member}</dt><dd>${BS.cm(n.on.t * BS.memberLength(S.model, S.model.members.find((mm) => mm.id === n.on.member), nm))} from J${S.model.members.find((mm) => mm.id === n.on.member).a}</dd>` : ''}
         </dl>
+        ${n.on ? '<p class="note">The beam stays one piece. Whatever is attached here bends it. Drag the joint to slide it along the beam.</p>' : ''}
         <div class="sel-actions">
-          ${sel.type === 'node' && ground ? `<button type="button" class="ghost" id="selAnchor">${n.fixed ? 'Release anchor' : 'Make anchor'}</button>` : ''}
+          ${sel.type === 'node' && ground && !n.on ? `<button type="button" class="ghost" id="selAnchor">${n.fixed ? 'Release anchor' : 'Make anchor'}</button>` : ''}
           ${sel.type === 'node' ? '<button type="button" class="ghost danger" id="selDel">Delete joint</button>' : ''}
         </div>`;
       $('selAnchor')?.addEventListener('click', () => { pushUndo(); n.fixed = !n.fixed; changed(); });
@@ -1046,6 +1114,7 @@
   });
 
   $('live').addEventListener('change', (e) => { S.live = e.target.checked; refreshLive(); renderSelection(); });
+  $('angles').addEventListener('change', (e) => { S.angles = e.target.checked; });
   $('snap').addEventListener('change', (e) => { S.snap = e.target.checked; });
 
   $('codeBtn').addEventListener('click', () => {
@@ -1299,7 +1368,7 @@
       model: S.model, mode: S.mode, view: S.view, proj: S.proj, level: S.level, sim: S.sim, report: S.report,
       live: S.live, liveChecks: S.liveChecks, mechanismNode: S.mechanismNode,
       hover: S.hover, selection: S.selection, preview: S.preview, highlight: S.highlight,
-      tooltip: S.tooltip, clock: S.clock,
+      tooltip: S.tooltip, clock: S.clock, angles: S.angles,
     });
     requestAnimationFrame(frame);
   }
